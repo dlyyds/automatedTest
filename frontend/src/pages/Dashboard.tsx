@@ -278,7 +278,7 @@ export default function Dashboard() {
         const caseKey = record.case_key || `${record.source_sheet}:${record.row_number}:${record.case_id}`
         const isParsed = store.aiParsedCases.has(caseKey) || !!aiParsedSteps[caseKey]
         return (
-          <Space size={4}>
+          <Space size={4} align="start" className="case-cell-content">
             <span>{text}</span>
             {isParsed && (
               <Tooltip title="AI 步骤已解析">
@@ -289,7 +289,7 @@ export default function Dashboard() {
         )
       },
     },
-    { title: '用例描述', dataIndex: 'description', width: 200, ellipsis: true },
+    { title: '用例描述', dataIndex: 'description', width: 200 },
     { title: '测试类型', dataIndex: 'test_type', width: 100 },
     { title: '优先级', dataIndex: 'priority', width: 80 },
     {
@@ -333,10 +333,10 @@ export default function Dashboard() {
         )
       },
     },
-    { title: '前置条件', dataIndex: 'prerequisites', width: 200, ellipsis: { showTitle: false },
+    { title: '前置条件', dataIndex: 'prerequisites', width: 200,
       render: (text: string) => <Tooltip placement="topLeft" title={text}><span>{text || '-'}</span></Tooltip>,
     },
-    { title: '测试步骤', dataIndex: 'test_steps', width: 300, ellipsis: { showTitle: false },
+    { title: '测试步骤', dataIndex: 'test_steps', width: 300,
       render: (text: string, record: TestCase) => {
         const caseKey = record.case_key || `${record.source_sheet}:${record.row_number}:${record.case_id}`
         const parsed = aiParsedSteps[caseKey]
@@ -371,7 +371,7 @@ export default function Dashboard() {
         )
 
         return (
-          <Space size={4}>
+          <Space size={4} align="start" className="case-cell-content">
             <Tooltip placement="topLeft" title={tooltipContent} overlayStyle={{ maxWidth: 500 }}>
               <span style={{ cursor: 'pointer' }}>{text}</span>
             </Tooltip>
@@ -396,10 +396,10 @@ export default function Dashboard() {
         )
       },
     },
-    { title: '预期结果', dataIndex: 'expected_result', width: 200, ellipsis: { showTitle: false },
+    { title: '预期结果', dataIndex: 'expected_result', width: 200,
       render: (text: string) => <Tooltip placement="topLeft" title={text}><span>{text}</span></Tooltip>,
     },
-    { title: '实际结果', dataIndex: 'actual_result', width: 300, ellipsis: { showTitle: false },
+    { title: '实际结果', dataIndex: 'actual_result', width: 300,
       render: (text: string, record: TestCase) => {
         const color = record.status === 'Pass' ? '#36b37e' :
                       record.status === 'Fail' ? '#de350b' :
@@ -431,7 +431,7 @@ export default function Dashboard() {
               </pre>
             }
           >
-            <span style={{ color, whiteSpace: 'pre-wrap', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{renderText(text)}</span>
+            <span style={{ color, whiteSpace: 'pre-wrap' }}>{renderText(text)}</span>
           </Tooltip>
         )
       },

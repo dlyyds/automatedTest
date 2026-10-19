@@ -180,6 +180,19 @@ body {
 .case-table .ant-table-tbody > tr > td {
   font-size: 13px;
   color: #172b4d;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+.case-table .case-cell-content {
+  display: flex;
+  max-width: 100%;
+}
+.case-table .case-cell-content > .ant-space-item:first-child {
+  min-width: 0;
+}
+.case-table .case-cell-content > .ant-space-item:not(:first-child) {
+  flex-shrink: 0;
 }
 .case-table .ant-table-tbody > tr:hover > td {
   background: #f4f5f7 !important;
