@@ -58,13 +58,13 @@ export default function AIAnalysisDrawer({
     }
   }, [cachedAnalysis, testCase])
 
-  const doAnalyze = useCallback(async () => {
+  const doAnalyze = useCallback(async (force = false) => {
     if (!testCase) return
     setLoading(true)
     setError(null)
     try {
       const caseKey = testCase.case_key || testCase.case_id
-      const res = await analyzeFailure(caseKey)
+      const res = await analyzeFailure(caseKey, force)
       const result = res.data.analysis
       setAnalysis(result)
       // 回调供父组件缓存
@@ -105,7 +105,7 @@ export default function AIAnalysisDrawer({
           <Button
             icon={<ReloadOutlined />}
             size="small"
-            onClick={doAnalyze}
+            onClick={() => doAnalyze(true)}
             loading={loading}
           >
             重新分析
@@ -123,7 +123,7 @@ export default function AIAnalysisDrawer({
         <div>
           <Alert type="error" message="分析失败" description={error} showIcon />
           <div style={{ textAlign: 'center', marginTop: 16 }}>
-            <Button type="primary" onClick={doAnalyze}>重试</Button>
+            <Button type="primary" onClick={() => doAnalyze(true)}>重试</Button>
           </div>
         </div>
       ) : analysis ? (
@@ -228,7 +228,7 @@ export default function AIAnalysisDrawer({
         </div>
       ) : (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
-          <Button type="primary" icon={<BulbOutlined />} onClick={doAnalyze}>
+          <Button type="primary" icon={<BulbOutlined />} onClick={() => doAnalyze()}>
             开始 AI 分析
           </Button>
         </div>

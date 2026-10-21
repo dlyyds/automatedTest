@@ -137,8 +137,8 @@ export const setAIConfig = (config: Partial<AIConfig>) =>
   api.post<ApiMessageResponse>('/ai/config', config)
 export const testAIConnection = () =>
   api.post<AIConnectionTestResult>('/ai/test')
-export const analyzeFailure = (caseId: string) =>
-  api.post<{ analysis: AIAnalysis }>('/ai/analyze', { case_id: caseId }, { timeout: 60000 })
+export const analyzeFailure = (caseId: string, force = false) =>
+  api.post<{ analysis: AIAnalysis }>('/ai/analyze', { case_id: caseId, force }, { timeout: 60000 })
 export const analyzeAllFailures = () =>
   api.post<{ analyses: AIAnalysis[]; total: number; analyzed: number }>('/ai/analyze-all', {}, { timeout: 300000 })
 export const generateReport = (format: string = 'markdown') =>

@@ -977,6 +977,7 @@ async def copy_to_so_path(request: Request, payload: CopyToSoRequest):
 class AnalyzeRequest(BaseModel):
     """AI 失败分析请求。"""
     case_id: str
+    force: bool = False  # 跳过缓存，强制重新分析
 
 
 class ReportRequest(BaseModel):
@@ -1121,6 +1122,7 @@ async def analyze_failure(request: Request, payload: AnalyzeRequest):
         actual_output=case.actual_result,
         match_reason=case.remarks,
         error_msg="",
+        force_refresh=payload.force,
     )
 
     if result is None:

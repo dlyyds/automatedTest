@@ -187,11 +187,14 @@ class AIService:
         actual_output: str,
         match_reason: str = "",
         error_msg: str = "",
+        force_refresh: bool = False,
     ) -> Optional[dict]:
         """AI 失败分析。
 
         返回: {root_cause_category, root_cause_summary, evidence[], explanation,
                suggestion[], confidence, is_likely_real_bug} 或 None（降级）
+
+        force_refresh=True 时跳过缓存，强制重新调用 AI（用户点"重新分析"）。
         """
         if not self.enabled or self.provider is None:
             return None
@@ -199,7 +202,7 @@ class AIService:
         # 检查缓存
         error_sig = error_msg[:100] if error_msg else match_reason[:100]
         cache_key_parts = ("analyze", case_id, error_sig)
-        cached = self._cache.get(*cache_key_parts)
+        cached = None if force_refresh else self._cache.get(*cache_key_parts)
         if cached:
             cached["_from_cache"] = True
             return cached
