@@ -683,6 +683,251 @@ class ExecutorAdapter:
         case.log_file = log_file
         return log_file
 
+    def preview_commands(self, case: TestCase, ai_parsed_steps=None) -> dict:
+        """预览某条用例将要下发到远端的命令（不连接 SSH、不执行任何命令）。
+
+        解析流程与 _execute_single 保持一致：
+        NA 判定 → 规则解析 → AI 缓存替换未识别步骤 → nvsipl 交互合并
+        → 执行模式判定 → 命令改写。
+        出于安全考虑，展示的命令不包含 sudo 密码，仅标注「执行时自动注入」。
+        """
+        case_key = case.case_key or f"{case.source_sheet}:{case.row_number}:{case.case_id}"
+        result = {
+            "case_id": case.case_id,
+            "case_key": case_key,
+            "description": case.description,
+            "na": False,
+            "na_reason": "",
+            "mode": "",
+            "mode_label": "",
+            "prerequisites_enabled": bool(
+                getattr(self.workspace, "run_prerequisites", True)
+            ),
+            "prerequisites": [],
+            "steps": [],
+            "unrecognized_count": 0,
+            "ai_cache_used": False,
+            "notes": [],
+            "error": "",
+        }
+
+        # NA 用例不会执行任何命令
+        is_na, na_reason = CommandParser.should_mark_na(
+            case.test_steps, case.expected_result,
+            case.prerequisites, case.description,
+        )
+        if is_na:
+            result.update(
+                na=True,
+                na_reason=na_reason,
+                mode="na",
+                mode_label="不执行（NA）",
+                notes=[f"判定为 NA（{na_reason}），该用例不会下发任何命令。"],
+            )
+            return result
+
+        # 前置条件在执行时按 ; 拆分并原样下发（MANUAL_CONFIRM 除外）
+        for item in (case.prerequisites or "").split(";"):
+            item = item.strip()
+            if not item:
+                continue
+            if item.startswith(CommandParser.MANUAL_CONFIRM_PREFIX):
+                result["prerequisites"].append({
+                    "command": item[len(CommandParser.MANUAL_CONFIRM_PREFIX):].strip(),
+                    "manual_confirm": True,
+                })
+            else:
+                result["prerequisites"].append({
+                    "command": item,
+                    "manual_confirm": False,
+                })
+
+        default_remote_path = getattr(self.workspace, "default_remote_path", "") or ""
+        steps = CommandParser.parse(case.test_steps, default_remote_path=default_remote_path)
+
+        # AI 兜底：只使用预解析缓存，预览阶段不触发实时 AI 调用
+        has_unrecognized = any(
+            s.kind == "skip" and "未识别步骤" in s.description for s in steps
+        )
+        ai_steps = (ai_parsed_steps or {}).get(case_key)
+        if has_unrecognized and ai_steps:
+            steps = CommandParser.apply_ai_parsed_steps(
+                steps, ai_parsed_steps or {}, case_key
+            )
+            result["ai_cache_used"] = True
+
+        steps = self._merge_nvsipl_interactive(steps)
+        result["unrecognized_count"] = sum(
+            1 for s in steps
+            if s.kind == "skip" and "未识别步骤" in s.description
+        )
+
+        # 执行模式判定（与 _execute_single 一致）
+        has_export = any(
+            s.kind == "command" and s.command.strip().startswith("export ")
+            for s in steps
+        )
+        has_repeat = any(s.kind == "repeat" for s in steps)
+        has_nvsipl = any(
+            s.kind == "command" and CommandParser.is_nvsipl_camera_command(s.command)
+            for s in steps
+        )
+        blocking_idx = self._find_blocking_nvsipl_index(steps)
+
+        if has_export and has_repeat and has_nvsipl:
+            mode = "persistent_shell"
+            mode_label = "持久化 Shell（同一 PTY 会话内顺序执行）"
+        elif blocking_idx is not None and blocking_idx < len(steps) - 1:
+            mode = "parallel_fault_test"
+            mode_label = "并行故障测试（nvsipl 占 PTY，其余命令走独立通道）"
+        elif blocking_idx is not None:
+            mode = "pty_nvsipl"
+            mode_label = "PTY 单步起流（自动注入 gc 并读取帧率）"
+        else:
+            mode = "sequential"
+            mode_label = "普通顺序执行（逐条独立 SSH 执行）"
+        result["mode"] = mode
+        result["mode_label"] = mode_label
+
+        mode_notes = {
+            "persistent_shell": "所有步骤在同一个 PTY Shell 会话中执行，export 的环境变量会保留。",
+            "parallel_fault_test": "起流命令占用 PTY，后续故障注入命令通过独立 SSH 通道并发执行。",
+            "pty_nvsipl": "起流命令占用 PTY，自动注入 gc 等待出帧，最后发送 q 退出。",
+            "sequential": "每条命令通过独立 SSH 通道执行，工作目录以 `cd <dir> &&` 前缀传递。",
+        }
+        if mode in mode_notes:
+            result["notes"].append(mode_notes[mode])
+        if not result["prerequisites_enabled"]:
+            result["notes"].append("工作区已关闭「执行前置条件」，前置条件不会下发。")
+        if result["unrecognized_count"] > 0:
+            result["notes"].append(
+                f"有 {result['unrecognized_count']} 个步骤未识别为命令，执行时会被跳过；"
+                "可先用「AI 解析步骤」补充后再预览。"
+            )
+
+        def finalize(raw_cmd: str, current_work_dir: str):
+            """返回 (实际下发命令, 改写说明, 是否需要 TTY)。"""
+            notes = []
+            shell_cmd = self._normalize_quotes(raw_cmd)
+
+            before = shell_cmd
+            shell_cmd = self._apply_nito_override(shell_cmd)
+            if shell_cmd != before:
+                notes.append("--nito 路径已按工作区配置覆盖")
+
+            before = shell_cmd
+            shell_cmd = self._apply_image_path_override(shell_cmd)
+            if shell_cmd != before:
+                notes.append("-f 图片路径已按工作区配置覆盖")
+
+            if re.search(r"\bsudo\b", shell_cmd):
+                notes.append("执行时自动注入 sudo 密码")
+
+            is_nvsipl = CommandParser.is_nvsipl_camera_command(raw_cmd)
+            if is_nvsipl:
+                if mode == "persistent_shell":
+                    notes.append("持久 Shell 模式：交互发送 gc / q，不包裹管道")
+                elif mode in ("parallel_fault_test", "pty_nvsipl"):
+                    notes.append("PTY 模式：自动注入 gc 并读取帧率")
+                else:
+                    wrapped = self._wrap_nvsipl_with_gc(shell_cmd, raw_cmd)
+                    if wrapped != shell_cmd:
+                        notes.append("自动包裹 gc 输入管道（sleep → gc → sleep）")
+                    shell_cmd = wrapped
+
+            # 持久 Shell 已提前 cd，其余模式逐条拼接 cd 前缀
+            if mode != "persistent_shell" and current_work_dir:
+                shell_cmd = f"cd {current_work_dir} && {shell_cmd}"
+            return shell_cmd, notes, is_nvsipl
+
+        work_dir = default_remote_path
+        capture_idx = 0
+        rows = []
+        for idx, step in enumerate(steps, 1):
+            row = {
+                "index": idx,
+                "step_num": step.step_num,
+                "kind": step.kind,
+                "action": "skip",
+                "terminal": step.terminal,
+                "description": step.description,
+                "raw_command": step.command,
+                "command": "",
+                "notes": [],
+                "needs_tty": False,
+            }
+
+            if step.kind == "command":
+                command, notes, needs_tty = finalize(step.command, work_dir)
+                # 持久 Shell 模式还需处理环境变量覆盖与拍照文件名前缀
+                if mode == "persistent_shell":
+                    if (command.strip().startswith("export ")
+                            and "CAM_ROTATE_CFG_PATH" in command
+                            and getattr(self.workspace, "cam_rotate_cfg_enabled", False)
+                            and getattr(self.workspace, "cam_rotate_cfg_path", "")):
+                        command = (
+                            f"export CAM_ROTATE_CFG_PATH="
+                            f"{self.workspace.cam_rotate_cfg_path}"
+                        )
+                        notes.append("CAM_ROTATE_CFG_PATH 已按工作区配置覆盖")
+                    if needs_tty:
+                        injected = self._inject_capture_name(
+                            command, capture_idx, ["default", "rotate"]
+                        )
+                        if injected != command:
+                            notes.append("拍照文件名前缀已自动补充")
+                        command = injected
+                        capture_idx += 1
+                row.update(
+                    action="execute", command=command,
+                    notes=notes, needs_tty=needs_tty,
+                )
+            elif step.kind in ("enter_dir", "cd"):
+                work_dir = step.command
+                row.update(
+                    action="change_dir",
+                    command=f"cd {step.command}",
+                    notes=["后续命令将在该目录下执行"],
+                )
+            elif step.kind == "nvsipl_input":
+                row.update(
+                    action="input",
+                    command=step.command,
+                    notes=["通过 PTY 发送给 nvsipl_camera"],
+                )
+            elif step.kind == "manual":
+                row.update(
+                    action="manual",
+                    notes=["人工操作步骤，不会自动下发"],
+                )
+            elif step.kind == "confirm":
+                row.update(
+                    action="confirm",
+                    notes=["执行到此步骤时弹出人工确认"],
+                )
+            elif step.kind in ("repeat", "repeat_stream"):
+                row.update(action="repeat")
+                if step.kind == "repeat_stream":
+                    row["notes"].append(
+                        f"反复起流 {step.command} 次"
+                        if step.command.isdigit() else "反复起流指令"
+                    )
+                if mode == "persistent_shell":
+                    row["notes"].append("持久 Shell 中会展开为实际步骤序列执行")
+                elif mode == "parallel_fault_test":
+                    row["notes"].append("并行模式下按轮次重复执行")
+                else:
+                    row["notes"].append(
+                        "当前执行模式下该重复指令不会展开，实际不会生效"
+                    )
+            else:  # skip
+                row["notes"].append(step.description or "已跳过")
+
+            rows.append(row)
+
+        result["steps"] = rows
+        return result
+
     def _fill_execution_meta(self, case: TestCase):
         """把工作区配置的 tester / version / date 回写到用例，供 Excel 保存时写入。"""
         if self.workspace:

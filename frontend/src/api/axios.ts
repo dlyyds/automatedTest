@@ -8,6 +8,7 @@ import type {
   AIParseStepsResponse,
   AIParseStepsBatchResponse,
   ApiMessageResponse,
+  CommandPreviewResponse,
   ExecuteStartResponse,
   SSHConfig,
   SSHStatus,
@@ -87,6 +88,13 @@ export const getCaseLog = (params: { path?: string; run_id?: string; case_key?: 
 
 export const selectCases = (caseIds: string[], selected: boolean) =>
   api.post<ApiMessageResponse>('/cases/select', caseIds, { params: { selected } })
+
+/**
+ * 预览用例将要下发到远端的命令。
+ * caseKeys 为空时后端返回当前所有已选用例。
+ */
+export const previewCaseCommands = (caseKeys: string[] = []) =>
+  api.post<CommandPreviewResponse>('/cases/preview-commands', { case_keys: caseKeys })
 
 export const getSSHConfig = () => api.get<SSHConfig>('/ssh/config')
 export const setSSHConfig = (config: SSHConfig) =>

@@ -7,8 +7,8 @@ import {
 import {
   UploadOutlined, PlayCircleOutlined, StopOutlined,
   DownloadOutlined, CheckOutlined, CloseOutlined,
-  RobotOutlined, BulbOutlined, FileTextOutlined,
-  ExperimentOutlined, LoadingOutlined, DownOutlined,
+  RobotOutlined, BulbOutlined, FileTextOutlined, CodeOutlined,
+  ExperimentOutlined, LoadingOutlined, DownOutlined, QuestionCircleOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useNavigate } from 'react-router-dom'
@@ -17,6 +17,8 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import AIAnalysisDrawer from '../components/AIAnalysisDrawer'
 import AIReportModal from '../components/AIReportModal'
 import CaseLogModal from '../components/CaseLogModal'
+import CommandPreviewModal from '../components/CommandPreviewModal'
+import TestStepRulesModal from '../components/TestStepRulesModal'
 import {
   downloadResults,
   getCases,
@@ -53,6 +55,10 @@ export default function Dashboard() {
   const [aiParsingCase, setAIParsingCase] = useState<string>('')
   // 实际执行日志弹窗
   const [logModalCase, setLogModalCase] = useState<TestCase | null>(null)
+  // 命令预览弹窗（为空表示关闭）
+  const [previewCommandKeys, setPreviewCommandKeys] = useState<string[] | null>(null)
+  // 测试步骤编写规则弹窗
+  const [stepRulesOpen, setStepRulesOpen] = useState(false)
 
   const handleAIAnalyze = useCallback((record: TestCase) => {
     setAIDrawerCase(record)
@@ -342,7 +348,27 @@ export default function Dashboard() {
     { title: '前置条件', key: 'prerequisites', dataIndex: 'prerequisites', width: 200,
       render: (text: string) => <Tooltip placement="topLeft" title={text}><span>{text || '-'}</span></Tooltip>,
     },
-    { title: '测试步骤', key: 'test_steps', dataIndex: 'test_steps', width: 300,
+    {
+      title: (
+        <Space size={2} align="center">
+          <span>测试步骤</span>
+          <Tooltip title="查看测试步骤编写规则">
+            <Button
+              type="text"
+              size="small"
+              icon={<QuestionCircleOutlined />}
+              onClick={(e) => {
+                e.stopPropagation()
+                setStepRulesOpen(true)
+              }}
+              style={{ padding: '0 2px', fontSize: 12, color: '#2f54eb' }}
+            />
+          </Tooltip>
+        </Space>
+      ),
+      key: 'test_steps',
+      dataIndex: 'test_steps',
+      width: 300,
       render: (text: string, record: TestCase) => {
         const caseKey = record.case_key || `${record.source_sheet}:${record.row_number}:${record.case_id}`
         const parsed = aiParsedSteps[caseKey]
@@ -385,6 +411,17 @@ export default function Dashboard() {
               <Tag color="purple" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
                 <RobotOutlined /> {parsed.filter(s => s.kind !== 'skip').length}
               </Tag>
+            )}
+            {text && (
+              <Tooltip title="查看将执行的命令">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CodeOutlined />}
+                  onClick={() => setPreviewCommandKeys([caseKey])}
+                  style={{ fontSize: 12, padding: '0 2px', color: '#2f54eb' }}
+                />
+              </Tooltip>
             )}
             {!parsed && text && (
               <Tooltip title="AI 解析步骤">
@@ -526,6 +563,17 @@ export default function Dashboard() {
             >
               停止
             </Button>
+            <Tooltip title="预览选中用例将要下发到板端的命令">
+              <Button
+                icon={<CodeOutlined />}
+                onClick={() => setPreviewCommandKeys(
+                  store.testCases.filter((c) => c.selected).map((c) => c.case_key || c.case_id)
+                )}
+                disabled={allSelectedCount === 0}
+              >
+                查看执行命令
+              </Button>
+            </Tooltip>
             <Button
               icon={<DownloadOutlined />}
               onClick={handleDownload}
@@ -694,7 +742,9 @@ export default function Dashboard() {
                   <Space direction="vertical">
                     {optionalColumns.map(column => (
                       <Checkbox key={String(column.key)} value={String(column.key)}>
-                        {String(column.title)}
+                        {typeof column.title === 'string'
+                          ? column.title
+                          : String(column.key) === 'test_steps' ? '测试步骤' : String(column.key)}
                       </Checkbox>
                     ))}
                   </Space>
@@ -773,6 +823,19 @@ export default function Dashboard() {
         path={logModalCase?.log_file}
         caseKey={logModalCase?.case_key}
         onClose={() => setLogModalCase(null)}
+      />
+
+      {/* ===== 即将执行命令预览弹窗 ===== */}
+      <CommandPreviewModal
+        open={previewCommandKeys !== null}
+        caseKeys={previewCommandKeys || []}
+        onClose={() => setPreviewCommandKeys(null)}
+      />
+
+      {/* ===== 测试步骤编写规则弹窗 ===== */}
+      <TestStepRulesModal
+        open={stepRulesOpen}
+        onClose={() => setStepRulesOpen(false)}
       />
     </div>
   )

@@ -35,6 +35,11 @@ class ExecuteRequest(BaseModel):
     case_ids: List[str] = []  # 兼容旧逻辑，实际传的是 case_key
 
 
+class CommandPreviewRequest(BaseModel):
+    """命令预览请求；case_keys 为空时预览当前所有已选用例。"""
+    case_keys: List[str] = []
+
+
 @router.post("/excel/upload")
 async def upload_excel(request: Request, file: UploadFile = File(...)):
     """上传 Excel 用例文件"""
@@ -255,6 +260,60 @@ async def get_cases(request: Request, sheet: str = None):
     if sheet:
         cases = [c for c in cases if c.get("source_sheet") == sheet]
     return cases
+
+
+@router.post("/cases/preview-commands")
+async def preview_case_commands(request: Request, payload: Optional[CommandPreviewRequest] = None):
+    """预览用例将要下发到远端的命令（不执行、不连接 SSH）。
+
+    - 传 case_keys：预览指定用例
+    - 不传：预览当前所有已选用例
+    """
+    session = request.state.session
+    if not session.test_cases:
+        raise HTTPException(status_code=400, detail="请先上传用例文件")
+
+    from dataclasses import fields
+    from app.core.executor_adapter import ExecutorAdapter
+
+    requested = [k for k in (payload.case_keys if payload else []) if k]
+    requested_set = set(requested)
+    targets = []
+    for c in session.test_cases:
+        case_key = c.get("case_key") or (
+            f"{c.get('source_sheet', '')}:{c.get('row_number', '')}:{c.get('case_id', '')}"
+        )
+        if requested_set:
+            if case_key in requested_set or c.get("case_id") in requested_set:
+                targets.append(c)
+        elif c.get("selected"):
+            targets.append(c)
+
+    if not targets:
+        detail = "未找到要预览的用例" if requested_set else "请先选择要执行的用例"
+        raise HTTPException(status_code=400, detail=detail)
+
+    valid_fields = {f.name for f in fields(TestCase)}
+    # 预览不需要 SSH 连接；仅借用工作区配置做路径覆盖展示
+    previewer = ExecutorAdapter(None, None, workspace=session.workspace)
+    ai_parsed = getattr(session, "ai_parsed_steps", {}) or {}
+
+    results = []
+    for c in targets:
+        case = TestCase(**{k: v for k, v in c.items() if k in valid_fields})
+        try:
+            results.append(previewer.preview_commands(case, ai_parsed))
+        except Exception as exc:
+            results.append({
+                "case_id": c.get("case_id", ""),
+                "case_key": c.get("case_key", ""),
+                "description": c.get("description", ""),
+                "error": f"解析失败: {exc}",
+                "steps": [],
+                "prerequisites": [],
+                "notes": [],
+            })
+    return {"cases": results}
 
 
 @router.get("/logs/content")
@@ -1196,9 +1255,18 @@ async def ai_parse_steps(request: Request, payload: ParseStepsRequest):
     if not service.enabled:
         raise HTTPException(status_code=400, detail="AI 功能未启用，请先配置 AI 设置")
 
+    def _cache_parsed_steps(parsed: dict):
+        """把单条解析结果写入会话缓存，供执行/命令预览复用。"""
+        if not payload.case_id:
+            return
+        if not hasattr(session, 'ai_parsed_steps'):
+            session.ai_parsed_steps = {}
+        session.ai_parsed_steps[payload.case_id] = parsed.get("parsed_steps", [])
+
     # 规则先行：CommandParser 能解出足够可执行步骤则直接返回，不调 AI
     rule_result = _rule_parse_steps(payload.step_text)
     if rule_result is not None:
+        _cache_parsed_steps(rule_result)
         return rule_result
 
     result = await service.parse_steps(
@@ -1211,6 +1279,7 @@ async def ai_parse_steps(request: Request, payload: ParseStepsRequest):
     if "_error" in result and not result.get("parsed_steps"):
         raise HTTPException(status_code=502, detail=result["_error"])
 
+    _cache_parsed_steps(result)
     return result
 
 

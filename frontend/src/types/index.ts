@@ -267,6 +267,49 @@ export interface AIParseStepsBatchResponse {
   failed: number
 }
 
+// =========================================================================
+// 远端命令预览类型
+// =========================================================================
+
+export interface CommandPreviewStep {
+  index: number
+  step_num: number
+  kind: string
+  action: 'execute' | 'change_dir' | 'input' | 'manual' | 'confirm' | 'repeat' | 'skip'
+  terminal: string
+  description: string
+  raw_command: string
+  command: string
+  notes: string[]
+  needs_tty: boolean
+}
+
+export interface CommandPreviewPrerequisite {
+  command: string
+  manual_confirm: boolean
+}
+
+export interface CommandPreviewCase {
+  case_id: string
+  case_key: string
+  description: string
+  na: boolean
+  na_reason: string
+  mode: string
+  mode_label: string
+  prerequisites_enabled: boolean
+  prerequisites: CommandPreviewPrerequisite[]
+  steps: CommandPreviewStep[]
+  unrecognized_count: number
+  ai_cache_used: boolean
+  notes: string[]
+  error?: string
+}
+
+export interface CommandPreviewResponse {
+  cases: CommandPreviewCase[]
+}
+
 export interface WsAIParseProgressMessage extends WsBaseMessage {
   type: 'ai_parse_progress'
   current: number
