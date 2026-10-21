@@ -11,6 +11,7 @@ import asyncio
 import os
 import re
 from datetime import datetime
+from typing import Optional, Tuple
 from app.core.test_case import TestCase, TestResult
 from app.core.command_parser import CommandParser
 from app.core.expected_parser import ExpectedResultParser, MatchResult
@@ -111,7 +112,7 @@ class ExecutorAdapter:
             results.append(result)
             await self.ws.send_case_complete(
                 case.case_id, result.status, result.match_reason,
-                case.case_key, case.actual_result
+                case.case_key, case.actual_result, result.log_file or case.log_file
             )
 
         return results
@@ -129,19 +130,30 @@ class ExecutorAdapter:
             result.end_time = datetime.now()
             case.status = "NA"
             case.actual_result = na_reason
+            self._write_case_log(
+                case, result,
+                f"[NA] {na_reason}\n\n用例: {case.case_id}\n描述: {case.description}\n"
+                f"判定: 命中 NA 关键字，未执行测试步骤\n",
+            )
             await self.ws.send_log(f"[{case.case_id}] 标记为 NA：{na_reason}", "info")
             return result
 
         # 前置条件
         if run_prerequisites and case.prerequisites:
             await self.ws.send_log(f"[{case.case_id}] 执行前置条件...", "info")
-            ok = await self._run_prerequisites(case.prerequisites)
+            ok, prereq_output = await self._run_prerequisites(case.prerequisites)
             if not ok:
                 result.status = "Fail"
                 result.error_msg = "前置条件失败"
+                result.actual_output = prereq_output
                 result.end_time = datetime.now()
                 case.status = "Fail"
                 case.actual_result = "前置条件失败"
+                self._write_case_log(
+                    case, result,
+                    f"[前置条件失败]\n前置条件:\n{case.prerequisites}\n\n"
+                    f"执行记录:\n{prereq_output}\n",
+                )
                 return result
 
         # 执行测试步骤
@@ -302,6 +314,11 @@ class ExecutorAdapter:
                                 result.end_time = datetime.now()
                                 case.status = "Fail"
                                 case.actual_result = result.error_msg
+                                self._write_case_log(
+                                    case, result,
+                                    "\n".join(combined_outputs + [result.error_msg]),
+                                    log_file=log_file,
+                                )
                                 return result
                             continue
 
@@ -371,11 +388,7 @@ class ExecutorAdapter:
                         f"< 预期 {criteria.file_count} 个: FAIL")
 
             result.actual_output = combined
-            result.log_file = log_file
-
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(combined)
-            result.log_file = log_file
+            self._write_case_log(case, result, combined, log_file=log_file)
 
             # 预期结果匹配
             # 判断用例类型并选择对应的匹配策略
@@ -435,8 +448,10 @@ class ExecutorAdapter:
                 # ---- AI 判定 ----
                 # 根据 ai_judge_mode 决定是否调用 AI:
                 #   "always"    — 每次都 AI 判定，AI 结果为最终结果
-                #   "uncertain" — 规则置信度 < 0.8 时才调 AI（原 fallback 模式）
+                #   "uncertain" — 规则置信度 < 0.8 时才调 AI
                 #   "off"       — 仅用规则引擎
+                # 只要 AI 返回了明确判定，就优先采用 AI 结果（不再按置信度回退规则）；
+                # AI 调用失败/返回异常时才回退规则引擎。
                 ai_judge_attempted = False
                 ai_judge_mode = "off"
                 if self._ai_service and self._ai_service.enabled:
@@ -497,74 +512,56 @@ class ExecutorAdapter:
                                            f"规则置信度不足({rule_conf:.2f})，需人工确认")
                                 ai_judge_attempted = True
 
-                        elif ai_result.get("confidence", 0) >= 0.7:
+                        elif ai_result:
                             ai_status = ai_result.get("status", "")
                             ai_conf = ai_result.get("confidence", 0)
                             ai_reason_text = ai_result.get("reason", "")
                             ai_source = "AI(cached)" if ai_result.get("_from_cache") else "AI"
 
                             if ai_status in ("Pass", "Fail"):
-                                # 故障测试保护：规则引擎 Pass + 关键字 100% 匹配时，
-                                # AI 的 Fail 不覆盖。故障测试中预期关键字出现 = 故障已触发，
-                                # AI 的语义推理（对比相邻用例故障名称归属）可能引入误判
-                                _rule_is_pass = (rule_status == "Pass")
-                                _kw_full_match = "关键字匹配率: 100.0%" in reason
-                                if (ai_status == "Fail" and _rule_is_pass
-                                        and criteria.is_fault_test and _kw_full_match):
-                                    reason += (
-                                        f"; [AI判定] {ai_source}: {ai_status} "
-                                        f"(置信度={ai_conf:.2f}，{ai_reason_text}) "
-                                        f"— 故障测试关键字100%匹配，AI判定仅作参考")
-                                    # 保持规则引擎的 Pass 结果，不覆盖
-                                    ai_judge_attempted = True
-                                    await self.ws.send_log(
-                                        f"[{case.case_id}] AI 判定 Fail 但规则引擎关键字100%匹配，"
-                                        f"保持规则 Pass（AI仅作参考）",
-                                        "info")
-                                else:
-                                    passed = ai_status == "Pass"
-                                    reason += f"; [AI判定] {ai_source}: {ai_status} (置信度={ai_conf:.2f}，{ai_reason_text})"
-                                    match_result = MatchResult(
-                                        passed=passed,
-                                        confidence=ai_conf,
-                                        reason=reason,
-                                        source="ai",
-                                    )
-                                    ai_judge_attempted = True
-                                    await self.ws.send_log(
-                                        f"[{case.case_id}] AI 判定: {ai_status} (置信度={ai_conf:.2f})",
-                                        "info")
+                                # AI 优先：只要 AI 给出明确判定，无论置信度高低都采用
+                                passed = ai_status == "Pass"
+                                reason += (f"; [AI判定] {ai_source}: {ai_status} "
+                                           f"(置信度={ai_conf:.2f}，{ai_reason_text})")
+                                match_result = MatchResult(
+                                    passed=passed,
+                                    confidence=ai_conf,
+                                    reason=reason,
+                                    source="ai",
+                                )
+                                result.ai_judged = True
+                                result.ai_status = ai_status
+                                result.ai_confidence = ai_conf
+                                result.ai_reason = ai_reason_text
+                                result.ai_evidence = ai_result.get("evidence") or []
+                                ai_judge_attempted = True
+                                await self.ws.send_log(
+                                    f"[{case.case_id}] AI 判定: {ai_status} (置信度={ai_conf:.2f})",
+                                    "info")
                             elif ai_status == "NEED_REVIEW":
+                                # AI 明确要求人工确认
                                 passed = None
-                                reason += f"; [AI判定] {ai_source}: NEED_REVIEW (置信度={ai_conf:.2f}，{ai_reason_text})"
+                                reason += (f"; [AI判定] {ai_source}: NEED_REVIEW "
+                                           f"(置信度={ai_conf:.2f}，{ai_reason_text})")
+                                result.ai_judged = True
+                                result.ai_status = ai_status
+                                result.ai_confidence = ai_conf
+                                result.ai_reason = ai_reason_text
+                                result.ai_evidence = ai_result.get("evidence") or []
                                 ai_judge_attempted = True
                                 await self.ws.send_log(
                                     f"[{case.case_id}] AI 判定: NEED_REVIEW (置信度={ai_conf:.2f})",
                                     "warning")
-                        else:
-                            # AI 返回了结果但置信度 < 0.7
-                            ai_conf = ai_result.get("confidence", 0) if ai_result else 0
-                            if ai_judge_mode == "always":
-                                if rule_conf >= 0.9:
-                                    reason += (f"; [AI判定] 置信度不足({ai_conf:.2f})，"
-                                               f"降级使用规则结果: {rule_status}(置信度={rule_conf:.2f})")
-                                    ai_judge_attempted = True
-                                    await self.ws.send_log(
-                                        f"[{case.case_id}] AI 置信度 {ai_conf:.2f} < 0.7，"
-                                        f"规则 {rule_conf:.2f} ≥ 0.9，降级使用规则结果",
-                                        "info")
-                                else:
-                                    passed = None
-                                    reason += (f"; [AI判定] 置信度不足({ai_conf:.2f})，需人工确认"
-                                               f"（规则参考: {rule_status}）")
-                                    ai_judge_attempted = True
-                                    await self.ws.send_log(
-                                        f"[{case.case_id}] AI 置信度 {ai_conf:.2f} < 0.7，标记 Review",
-                                        "warning")
                             else:
+                                # AI 返回了无法识别的状态，沿用规则结果
                                 await self.ws.send_log(
-                                    f"[{case.case_id}] AI 置信度 {ai_conf:.2f} < 0.7，保留规则判定",
-                                    "info")
+                                    f"[{case.case_id}] AI 返回状态异常({ai_status!r})，沿用规则判定",
+                                    "warning")
+                        else:
+                            # AI 未返回结果，沿用规则结果
+                            await self.ws.send_log(
+                                f"[{case.case_id}] AI 未返回判定结果，沿用规则判定",
+                                "warning")
                     except Exception as ai_err:
                         if ai_judge_mode == "always":
                             if rule_conf >= 0.9:
@@ -632,6 +629,17 @@ class ExecutorAdapter:
                 await self.ws.send_log(
                     f"[{case.case_id}] SSH 状态检查/重连异常: {reconnect_err}", "error")
 
+            # 保存异常现场（若已写过日志则追加，避免覆盖完整输出）
+            log_content = f"[执行异常] {type(e).__name__}: {e}\n{tb}\n"
+            if combined_outputs:
+                log_content = "\n".join(combined_outputs) + "\n\n" + log_content
+            log_exists = bool(result.log_file and os.path.exists(result.log_file))
+            self._write_case_log(
+                case, result, log_content,
+                log_file=result.log_file or log_file,
+                append=log_exists,
+            )
+
         result.end_time = datetime.now()
         case.status = result.status
         # 嵌入行信息用例：直接将 metadata log 作为实际结果
@@ -651,8 +659,29 @@ class ExecutorAdapter:
                 sr_hs_lines.append(stripped)
             case.actual_result = f"[待确认] sr/hs 输出 log:\n" + "\n".join(sr_hs_lines[:60])
         else:
-            case.actual_result = self._build_evidence_summary(result, result.status == "Pass", is_fault_test=is_fault_test)
+            summary_passed = None if result.status == "Review" else (result.status == "Pass")
+            case.actual_result = self._build_evidence_summary(result, summary_passed, is_fault_test=is_fault_test)
         return result
+
+    def _write_case_log(self, case: TestCase, result: TestResult, content: str,
+                        log_file: str = "", append: bool = False) -> str:
+        """保存单个用例的实际执行日志，并同步路径到 TestCase/TestResult。"""
+        if not log_file:
+            log_file = (
+                f"{self.log_dir}/{case.case_id}_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            )
+        try:
+            os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+            with open(log_file, "a" if append else "w", encoding="utf-8") as f:
+                f.write(content or "")
+        except Exception as exc:
+            # 日志保存失败不应影响测试执行与判定
+            print(f"[WARN] 保存用例日志失败 {log_file}: {exc}")
+            return ""
+        result.log_file = log_file
+        case.log_file = log_file
+        return log_file
 
     def _fill_execution_meta(self, case: TestCase):
         """把工作区配置的 tester / version / date 回写到用例，供 Excel 保存时写入。"""
@@ -862,22 +891,37 @@ class ExecutorAdapter:
         return cmd
 
     @staticmethod
-    def _build_evidence_summary(result, passed: bool, is_fault_test: bool = False) -> str:
+    def _build_evidence_summary(result, passed: Optional[bool], is_fault_test: bool = False) -> str:
         """\u4ece\u6267\u884c\u7ed3\u679c\u548c\u5339\u914d\u539f\u56e0\u4e2d\u63d0\u53d6\u5173\u952e\u8bc1\u636e\u6458\u8981\u3002
 
-        \u751f\u6210\u683c\u5f0f: [Pass/Fail] \u5224\u5b9a\u4f9d\u636e | \u5173\u952e\u8f93\u51fa\u884c
+        \u751f\u6210\u683c\u5f0f: [Pass/Fail/\u5f85\u786e\u8ba4] \u5224\u5b9a\u4f9d\u636e | \u5173\u952e\u8f93\u51fa\u884c
+        \u82e5\u7531 AI \u5224\u5b9a\uff0c\u4f18\u5148\u5c55\u793a AI \u751f\u6210\u7684\u5224\u5b9a\u4f9d\u636e\u4e0e\u8bc1\u636e\u3002
         \u7528\u4e8e\u524d\u7aef\u5c55\u793a\u548c Excel \u56de\u5199\uff0c\u4f7f\u5224\u5b9a\u4f9d\u636e\u4e00\u76ee\u4e86\u7136\u3002
         """
         import re
 
-        status_label = "[Pass]" if passed else "[Fail]"
+        status_label = "[Pass]" if passed is True else ("[\u5f85\u786e\u8ba4]" if passed is None else "[Fail]")
         actual = result.actual_output or ""
         reason = result.match_reason or ""
         error_msg = result.error_msg or ""
 
-        # --- Part 1: \u5224\u5b9a\u4f9d\u636e\uff08\u6765\u81ea match_reason\uff09---
+        # --- Part 1: \u5224\u5b9a\u4f9d\u636e\uff08AI \u4f18\u5148\uff0c\u5176\u6b21 match_reason\uff09---
         reason_summary = ""
-        if not passed and error_msg:
+        ai_judged = getattr(result, "ai_judged", False)
+        ai_reason = getattr(result, "ai_reason", "") or ""
+        ai_evidence = getattr(result, "ai_evidence", []) or []
+        if ai_judged:
+            ai_confidence = float(getattr(result, "ai_confidence", 0.0) or 0.0)
+            ai_status = getattr(result, "ai_status", "") or ""
+            reason_text = ai_reason or "(AI \u672a\u63d0\u4f9b\u6587\u5b57\u8bf4\u660e)"
+            reason_summary = (
+                f"[AI\u5224\u5b9a] {ai_status} \u5224\u5b9a\u4f9d\u636e(\u7f6e\u4fe1\u5ea6={ai_confidence:.2f}): "
+                f"{reason_text}"
+            )
+            if ai_evidence:
+                evidence_text = "\n".join(f"- {str(e)}" for e in ai_evidence[:5])
+                reason_summary += f"\nAI \u8bc1\u636e:\n{evidence_text}"
+        elif passed is not True and error_msg:
             # \u6267\u884c\u5f02\u5e38\u76f4\u63a5\u7528 error_msg
             reason_summary = error_msg[:150]
         elif reason:
@@ -1048,13 +1092,24 @@ class ExecutorAdapter:
             is_generic_reason = all(
                 k in reason_summary for k in ['OK']
             ) and '\u5e27' not in reason_summary and '\u5339\u914d' not in reason_summary
-            if not (interactive_output_lines and is_generic_reason):
+            if ai_judged or not (interactive_output_lines and is_generic_reason):
                 parts.append(reason_summary)
         if evidence_lines:
-            parts.append("\n".join(evidence_lines))
+            if ai_judged:
+                # AI 证据已在 reason_summary 中展示，避免关键输出行重复
+                ai_evidence_set = {str(e).strip() for e in ai_evidence}
+                unique_lines = [
+                    line for line in evidence_lines
+                    if line.strip() and line.strip() not in ai_evidence_set
+                ]
+                if unique_lines:
+                    parts.append("\n".join(unique_lines))
+            else:
+                parts.append("\n".join(evidence_lines))
 
         if parts:
-            summary = f"{status_label} {' | '.join(parts)}"
+            separator = "\n" if ai_judged else " | "
+            summary = f"{status_label} {separator.join(parts)}"
         else:
             # \u515c\u5e95
             fallback = actual[:300] if actual else reason[:300]
@@ -1070,6 +1125,8 @@ class ExecutorAdapter:
             max_len = 1500  # \u6545\u969c\u6d4b\u8bd5\u9700\u8981\u5c55\u793a\u5b8c\u6574 error log
         else:
             max_len = 500
+        if ai_judged:
+            max_len = max(max_len, 1200)  # \u4fdd\u7559\u5b8c\u6574\u7684 AI \u5224\u5b9a\u4f9d\u636e\u4e0e\u8bc1\u636e
         return summary[:max_len]
 
     def _apply_nito_override(self, cmd: str) -> str:
@@ -1263,12 +1320,13 @@ class ExecutorAdapter:
                 return (-1, "", "执行被用户中止")
             raise
 
-    async def _run_prerequisites(self, prereq: str) -> bool:
-        """执行前置条件。
+    async def _run_prerequisites(self, prereq: str) -> Tuple[bool, str]:
+        """执行前置条件，返回 (是否通过, 执行记录)。
 
         支持 ``MANUAL_CONFIRM <说明>`` 触发人工确认，其余按命令执行。
         兼容用 ``;`` 分隔的多条命令。
         """
+        outputs: list[str] = []
         for cmd in prereq.split(";"):
             cmd = cmd.strip()
             if not cmd:
@@ -1276,15 +1334,19 @@ class ExecutorAdapter:
             if cmd.startswith(CommandParser.MANUAL_CONFIRM_PREFIX):
                 desc = cmd.replace(CommandParser.MANUAL_CONFIRM_PREFIX, "").strip()
                 ok = await self.ws.request_manual_confirm(desc)
+                outputs.append(f"[人工确认] {desc}: {'通过' if ok else '未通过'}")
                 if not ok:
-                    return False
+                    return False, "\n".join(outputs)
             else:
                 await self.ws.send_log(f"前置条件执行: {cmd}", "info")
-                exit_code, _, _ = await self._ssh_execute(cmd, timeout=60)
+                exit_code, stdout, stderr = await self._ssh_execute(cmd, timeout=60)
+                outputs.append(
+                    f"$ {cmd}\n{stdout or ''}{stderr or ''}\nexit_code={exit_code}"
+                )
                 if exit_code != 0:
                     await self.ws.send_log(f"前置条件失败: {cmd} (exit={exit_code})", "error")
-                    return False
-        return True
+                    return False, "\n".join(outputs)
+        return True, "\n".join(outputs)
 
     async def _check_remote_files(self, case_id: str, work_dir: str, file_ext: str) -> str:
         """在板端查找最近 3 分钟内生成的指定后缀文件。

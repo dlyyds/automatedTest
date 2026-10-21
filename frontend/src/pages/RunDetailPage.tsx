@@ -18,8 +18,10 @@ import {
 import {
   ArrowLeftOutlined,
   BarChartOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import { getRunDetail } from '../api/historyApi'
+import CaseLogModal from '../components/CaseLogModal'
 import type { TestRun, RunResult } from '../types/history'
 import axios from 'axios'
 
@@ -55,6 +57,7 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<TestRun | null>(null)
   const [results, setResults] = useState<RunResult[]>([])
   const [loading, setLoading] = useState(true)
+  const [logResult, setLogResult] = useState<RunResult | null>(null)
 
   async function loadDetail() {
     if (!runId) return
@@ -184,15 +187,29 @@ export default function RunDetailPage() {
       ellipsis: {
         showTitle: false,
       },
-      render: (text: string) => (
-        <Tooltip
-          title={text}
-          placement="topLeft"
-          overlayStyle={{ maxWidth: 600 }}
-          overlayInnerStyle={{ whiteSpace: 'pre-wrap' }}
-        >
-          <span>{text}</span>
-        </Tooltip>
+      render: (text: string, record: RunResult) => (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+          <Tooltip
+            title={text}
+            placement="topLeft"
+            overlayStyle={{ maxWidth: 600 }}
+            overlayInnerStyle={{ whiteSpace: 'pre-wrap' }}
+          >
+            <span style={{ flex: 1 }}>{text}</span>
+          </Tooltip>
+          <Tooltip title={record.log_file ? '查看实际执行日志' : '暂无执行日志'}>
+            <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+              <Button
+                type="text"
+                size="small"
+                icon={<FileTextOutlined />}
+                disabled={!record.log_file}
+                onClick={() => setLogResult(record)}
+                style={{ padding: '0 2px', color: '#2f54eb' }}
+              />
+            </span>
+          </Tooltip>
+        </div>
       ),
     },
     {
@@ -326,6 +343,15 @@ export default function RunDetailPage() {
           </Card>
         </>
       )}
+
+      <CaseLogModal
+        open={!!logResult}
+        title={logResult ? `执行日志 - ${logResult.case_id}` : undefined}
+        path={logResult?.log_file}
+        runId={runId}
+        caseKey={logResult?.case_key || logResult?.case_id}
+        onClose={() => setLogResult(null)}
+      />
     </div>
   )
 }

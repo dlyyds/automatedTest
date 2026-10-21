@@ -23,6 +23,12 @@ class TestResult:
     actual_output: str = ""
     match_reason: str = ""
     error_msg: str = ""
+    # AI 判定详情（供实际结果展示 AI 生成的判断依据）
+    ai_judged: bool = False
+    ai_status: str = ""
+    ai_confidence: float = 0.0
+    ai_reason: str = ""
+    ai_evidence: List[str] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -41,6 +47,11 @@ class TestResult:
             "actual_output": self.actual_output,
             "match_reason": self.match_reason,
             "error_msg": self.error_msg,
+            "ai_judged": self.ai_judged,
+            "ai_status": self.ai_status,
+            "ai_confidence": self.ai_confidence,
+            "ai_reason": self.ai_reason,
+            "ai_evidence": self.ai_evidence,
             "duration": self.duration,
         }
 

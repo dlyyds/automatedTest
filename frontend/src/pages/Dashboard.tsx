@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { isAxiosError } from 'axios'
 import {
   Card, Row, Col, Upload, Button, Table, Tag, Progress, Statistic,
-  Space, Typography, message, Alert, Radio, Checkbox, Tooltip, Dropdown,
+  Space, Typography, message, Alert, Radio, Checkbox, Tooltip, Dropdown, Popover,
 } from 'antd'
 import {
   UploadOutlined, PlayCircleOutlined, StopOutlined,
@@ -12,10 +12,11 @@ import {
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useNavigate } from 'react-router-dom'
-import { useStore } from '../stores/useStore'
+import { optionalCaseColumnKeys, useStore } from '../stores/useStore'
 import { useWebSocket } from '../hooks/useWebSocket'
 import AIAnalysisDrawer from '../components/AIAnalysisDrawer'
 import AIReportModal from '../components/AIReportModal'
+import CaseLogModal from '../components/CaseLogModal'
 import {
   downloadResults,
   getCases,
@@ -35,6 +36,7 @@ const { Text } = Typography
 export default function Dashboard() {
   const navigate = useNavigate()
   const store = useStore()
+  const { visibleCaseColumnKeys: visibleColumnKeys, setVisibleCaseColumnKeys: setVisibleColumnKeys } = store
   const ws = useWebSocket()
   const [loading, setLoading] = useState(false)
   // 分页状态
@@ -49,6 +51,8 @@ export default function Dashboard() {
   // AI 步骤解析缓存
   const [aiParsedSteps, setAIParsedSteps] = useState<Record<string, AIParsedStep[]>>({})
   const [aiParsingCase, setAIParsingCase] = useState<string>('')
+  // 实际执行日志弹窗
+  const [logModalCase, setLogModalCase] = useState<TestCase | null>(null)
 
   const handleAIAnalyze = useCallback((record: TestCase) => {
     setAIDrawerCase(record)
@@ -255,6 +259,7 @@ export default function Dashboard() {
           </Dropdown>
         </Space>
       ),
+      key: 'selected',
       dataIndex: 'selected',
       width: 48,
       fixed: 'left',
@@ -267,13 +272,14 @@ export default function Dashboard() {
     },
     {
       title: '#',
+      key: 'index',
       width: 50,
       fixed: 'left',
       render: (_: unknown, __: TestCase, index: number) => (
         <span style={{ color: '#9ca3af' }}>{index + 1}</span>
       ),
     },
-    { title: '用例编号', dataIndex: 'case_id', width: 130, fixed: 'left',
+    { title: '用例编号', key: 'case_id', dataIndex: 'case_id', width: 130, fixed: 'left',
       render: (text: string, record: TestCase) => {
         const caseKey = record.case_key || `${record.source_sheet}:${record.row_number}:${record.case_id}`
         const isParsed = store.aiParsedCases.has(caseKey) || !!aiParsedSteps[caseKey]
@@ -289,11 +295,11 @@ export default function Dashboard() {
         )
       },
     },
-    { title: '用例描述', dataIndex: 'description', width: 200 },
-    { title: '测试类型', dataIndex: 'test_type', width: 100 },
-    { title: '优先级', dataIndex: 'priority', width: 80 },
+    { title: '用例描述', key: 'description', dataIndex: 'description', width: 200 },
+    { title: '测试类型', key: 'test_type', dataIndex: 'test_type', width: 100 },
+    { title: '优先级', key: 'priority', dataIndex: 'priority', width: 80 },
     {
-      title: '状态', dataIndex: 'status', width: 120,
+      title: '状态', key: 'status', dataIndex: 'status', width: 120,
       render: (s: string, record: TestCase) => {
         const colors: Record<string, string> = { Pass: 'green', Fail: 'red', NT: 'default', BLOCK: 'orange', NA: 'default', Running: 'processing', Review: 'blue' }
         const labels: Record<string, string> = { Review: '待确认' }
@@ -333,10 +339,10 @@ export default function Dashboard() {
         )
       },
     },
-    { title: '前置条件', dataIndex: 'prerequisites', width: 200,
+    { title: '前置条件', key: 'prerequisites', dataIndex: 'prerequisites', width: 200,
       render: (text: string) => <Tooltip placement="topLeft" title={text}><span>{text || '-'}</span></Tooltip>,
     },
-    { title: '测试步骤', dataIndex: 'test_steps', width: 300,
+    { title: '测试步骤', key: 'test_steps', dataIndex: 'test_steps', width: 300,
       render: (text: string, record: TestCase) => {
         const caseKey = record.case_key || `${record.source_sheet}:${record.row_number}:${record.case_id}`
         const parsed = aiParsedSteps[caseKey]
@@ -396,10 +402,10 @@ export default function Dashboard() {
         )
       },
     },
-    { title: '预期结果', dataIndex: 'expected_result', width: 200,
+    { title: '预期结果', key: 'expected_result', dataIndex: 'expected_result', width: 200,
       render: (text: string) => <Tooltip placement="topLeft" title={text}><span>{text}</span></Tooltip>,
     },
-    { title: '实际结果', dataIndex: 'actual_result', width: 300,
+    { title: '实际结果', key: 'actual_result', dataIndex: 'actual_result', width: 300,
       render: (text: string, record: TestCase) => {
         const color = record.status === 'Pass' ? '#36b37e' :
                       record.status === 'Fail' ? '#de350b' :
@@ -415,29 +421,43 @@ export default function Dashboard() {
           )}</>
         }
         return (
-          <Tooltip
-            placement="topLeft"
-            overlayStyle={{ maxWidth: 600 }}
-            title={
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxWidth: 560, fontSize: 12 }}>
-                {text && text.includes('[WARN]')
-                  ? text.split(/(\[WARN\][^\n;]*)/g).map((part, idx) =>
-                      part.startsWith('[WARN]')
-                        ? <span key={idx} style={{ color: '#fa8c16', fontWeight: 600 }}>{part}</span>
-                        : <span key={idx}>{part}</span>
-                    )
-                  : text
-                }
-              </pre>
-            }
-          >
-            <span style={{ color, whiteSpace: 'pre-wrap' }}>{renderText(text)}</span>
-          </Tooltip>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+            <Tooltip
+              placement="topLeft"
+              overlayStyle={{ maxWidth: 600 }}
+              title={
+                <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxWidth: 560, fontSize: 12 }}>
+                  {text && text.includes('[WARN]')
+                    ? text.split(/(\[WARN\][^\n;]*)/g).map((part, idx) =>
+                        part.startsWith('[WARN]')
+                          ? <span key={idx} style={{ color: '#fa8c16', fontWeight: 600 }}>{part}</span>
+                          : <span key={idx}>{part}</span>
+                      )
+                    : text
+                  }
+                </pre>
+              }
+            >
+              <span style={{ color, whiteSpace: 'pre-wrap', flex: 1 }}>{renderText(text)}</span>
+            </Tooltip>
+            <Tooltip title={record.log_file ? '查看实际执行日志' : '暂无执行日志'}>
+              <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<FileTextOutlined />}
+                  disabled={!record.log_file}
+                  onClick={() => setLogModalCase(record)}
+                  style={{ padding: '0 2px', color: '#2f54eb' }}
+                />
+              </span>
+            </Tooltip>
+          </div>
         )
       },
     },
     {
-      title: '操作', width: 80, fixed: 'right' as const,
+      title: '操作', key: 'actions', width: 80, fixed: 'right' as const,
       render: (_: unknown, record: TestCase) => {
         const status = (record.status || '').toUpperCase()
         const canAnalyze = status === 'FAIL' || status === 'REVIEW'
@@ -457,6 +477,13 @@ export default function Dashboard() {
       },
     },
   ]
+
+  const optionalColumns = columns.filter(column => optionalCaseColumnKeys.includes(String(column.key)))
+  const hasScrollableColumns = optionalColumns.some(column => !column.fixed && visibleColumnKeys.includes(String(column.key)))
+  const visibleColumns = columns
+    .filter(column => !optionalCaseColumnKeys.includes(String(column.key)) || visibleColumnKeys.includes(String(column.key)))
+    .map(column => hasScrollableColumns ? column : { ...column, fixed: undefined })
+  const visibleTableWidth = visibleColumns.reduce((total, column) => total + Number(column.width || 0), 0)
 
   // ===== 统计数据 =====
   const passCount = filteredCases.filter(c => c.status === 'Pass').length
@@ -649,12 +676,44 @@ export default function Dashboard() {
       <Card
         title="测试用例"
         className="case-table"
+        extra={
+          <Popover
+            trigger="click"
+            placement="bottomRight"
+            title="选择显示列"
+            content={
+              <Space direction="vertical" size={12}>
+                <Checkbox
+                  checked={visibleColumnKeys.length === optionalCaseColumnKeys.length}
+                  indeterminate={visibleColumnKeys.length > 0 && visibleColumnKeys.length < optionalCaseColumnKeys.length}
+                  onChange={(e) => setVisibleColumnKeys(e.target.checked ? [...optionalCaseColumnKeys] : [])}
+                >
+                  全选
+                </Checkbox>
+                <Checkbox.Group<string> value={visibleColumnKeys} onChange={setVisibleColumnKeys}>
+                  <Space direction="vertical">
+                    {optionalColumns.map(column => (
+                      <Checkbox key={String(column.key)} value={String(column.key)}>
+                        {String(column.title)}
+                      </Checkbox>
+                    ))}
+                  </Space>
+                </Checkbox.Group>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  选择框、序号和操作列始终显示
+                </Text>
+              </Space>
+            }
+          >
+            <Button size="small">显示列 <DownOutlined /></Button>
+          </Popover>
+        }
       >
         <Table
-          columns={columns}
+          columns={visibleColumns}
           dataSource={filteredCases}
           rowKey="case_key"
-          scroll={{ x: 1400 }}
+          scroll={hasScrollableColumns ? { x: visibleTableWidth } : undefined}
           size="small"
           pagination={{
             current: currentPage,
@@ -705,6 +764,15 @@ export default function Dashboard() {
         open={aiReportOpen}
         onClose={() => setAIReportOpen(false)}
         hasCases={store.testCases.length > 0}
+      />
+
+      {/* ===== 实际执行日志弹窗 ===== */}
+      <CaseLogModal
+        open={!!logModalCase}
+        title={logModalCase ? `执行日志 - ${logModalCase.case_id}` : undefined}
+        path={logModalCase?.log_file}
+        caseKey={logModalCase?.case_key}
+        onClose={() => setLogModalCase(null)}
       />
     </div>
   )

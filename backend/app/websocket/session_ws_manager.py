@@ -57,7 +57,8 @@ class SessionWSManager:
         })
 
     async def send_case_complete(self, case_id: str, status: str, reason: str = "",
-                                case_key: str = "", actual_result: str = ""):
+                                case_key: str = "", actual_result: str = "",
+                                log_file: str = ""):
         """发送单用例完成通知"""
         await self.broadcast({
             "type": "case_complete",
@@ -66,6 +67,7 @@ class SessionWSManager:
             "status": status,
             "reason": reason,
             "actual_result": actual_result,
+            "log_file": log_file,
         })
 
     async def send_execution_finished(self, results: list):

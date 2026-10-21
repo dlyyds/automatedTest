@@ -78,6 +78,13 @@ export const uploadExcel = (file: File) => {
 export const getCases = (sheet?: string) =>
   api.get<TestCase[]>('/cases', { params: { sheet } })
 
+/**
+ * 读取单条用例的实际执行日志。
+ * 当前会话传 case_key（或路径 path），历史记录传 run_id + case_key。
+ */
+export const getCaseLog = (params: { path?: string; run_id?: string; case_key?: string }) =>
+  api.get<{ path: string; content: string }>('/logs/content', { params })
+
 export const selectCases = (caseIds: string[], selected: boolean) =>
   api.post<ApiMessageResponse>('/cases/select', caseIds, { params: { selected } })
 

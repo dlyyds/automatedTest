@@ -11,7 +11,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { isAxiosError } from 'axios'
 import {
-  Card, Form, Input, Select, Switch, Button, Space, Alert,
+  Card, Form, Input, Select, AutoComplete, Switch, Button, Space, Alert,
   Typography, Divider, InputNumber, Tooltip, Spin, Radio,
 } from 'antd'
 import {
@@ -246,13 +246,22 @@ export default function AIConfigPanel() {
           </Form.Item>
         )}
 
-        {/* 模型选择 */}
-        <Form.Item name="ai_model" label="模型" style={{ maxWidth: 320 }}>
-          <Select
+        {/* 模型选择：预设下拉 + 任意自定义输入 */}
+        <Form.Item
+          name="ai_model"
+          label="模型"
+          style={{ maxWidth: 320 }}
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>可直接输入任意模型名称，不限于预设列表</Text>}
+        >
+          <AutoComplete
             options={MODEL_PRESETS[currentProvider] || []}
-            showSearch
             allowClear
-            placeholder="选择或输入自定义模型名称"
+            placeholder="选择预设或输入自定义模型名称"
+            filterOption={(inputValue, option) => {
+              const keyword = inputValue.toLowerCase()
+              return String(option?.label ?? '').toLowerCase().includes(keyword)
+                || String(option?.value ?? '').toLowerCase().includes(keyword)
+            }}
           />
         </Form.Item>
 
@@ -285,7 +294,7 @@ export default function AIConfigPanel() {
         <Form.Item
           name="ai_judge_mode"
           label={
-            <Tooltip title="始终: 每个用例执行后 AI 根据 log 判定 Pass/Fail；仅不确定时: 规则引擎置信度低时才调 AI；关闭: 仅用规则引擎">
+            <Tooltip title="启用 AI 判定后优先采用 AI 结果：始终 = 每个用例执行后都调 AI 判定 Pass/Fail；仅不确定时 = 规则引擎置信度 < 0.8 时才调 AI；关闭 = 仅用规则引擎。AI 不可用或返回异常时自动回退规则引擎。">
               AI 判定模式
             </Tooltip>
           }

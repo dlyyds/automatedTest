@@ -9,6 +9,11 @@ import type {
   WorkspaceConfig,
 } from '../types'
 
+export const optionalCaseColumnKeys = [
+  'case_id', 'description', 'test_type', 'priority', 'status',
+  'prerequisites', 'test_steps', 'expected_result', 'actual_result',
+]
+
 const resolveCaseKey = (testCase: TestCase) =>
   testCase.case_key || `${testCase.source_sheet}:${testCase.row_number}:${testCase.case_id}`
 
@@ -24,6 +29,7 @@ export interface AIParseProgress {
 
 interface AppState {
   testCases: TestCase[]
+  visibleCaseColumnKeys: string[]
   sheets: string[]
   currentSheet: string
   logs: LogEntry[]
@@ -39,6 +45,7 @@ interface AppState {
   aiParsedCases: Set<string>
 
   setTestCases: (cases: TestCase[]) => void
+  setVisibleCaseColumnKeys: (keys: string[]) => void
   setSheets: (sheets: string[]) => void
   setCurrentSheet: (sheet: string) => void
   addLog: (log: LogEntry) => void
@@ -50,7 +57,7 @@ interface AppState {
   setSSHConfig: (c: SSHConfig) => void
   setSSHStatus: (s: SSHStatus) => void
   setWorkspace: (w: WorkspaceConfig) => void
-  updateCaseStatus: (caseKey: string, status: string, actualResult?: string) => void
+  updateCaseStatus: (caseKey: string, status: string, actualResult?: string, logFile?: string) => void
   updateCaseSelected: (caseKey: string, selected: boolean) => void
   setAllCaseSelected: (selected: boolean) => void
   resetSelectedCases: () => void
@@ -62,6 +69,7 @@ interface AppState {
 
 export const useStore = create<AppState>((set) => ({
   testCases: [],
+  visibleCaseColumnKeys: [...optionalCaseColumnKeys],
   sheets: [],
   currentSheet: '',
   logs: [],
@@ -81,6 +89,7 @@ export const useStore = create<AppState>((set) => ({
       case_key: resolveCaseKey(c),
     })),
   }),
+  setVisibleCaseColumnKeys: (keys) => set({ visibleCaseColumnKeys: keys }),
   setSheets: (sheets) => set({ sheets }),
   setCurrentSheet: (sheet) => set({ currentSheet: sheet }),
   addLog: (log) => set((state) => ({ logs: [...state.logs, log] })),
@@ -92,11 +101,16 @@ export const useStore = create<AppState>((set) => ({
   setSSHConfig: (c) => set({ sshConfig: c }),
   setSSHStatus: (s) => set({ sshStatus: s }),
   setWorkspace: (w) => set({ workspace: w }),
-  updateCaseStatus: (caseKey, status, actualResult?) =>
+  updateCaseStatus: (caseKey, status, actualResult?, logFile?) =>
     set((state) => ({
       testCases: state.testCases.map((c) =>
         resolveCaseKey(c) === caseKey
-          ? { ...c, status, ...(actualResult !== undefined ? { actual_result: actualResult } : {}) }
+          ? {
+              ...c,
+              status,
+              ...(actualResult !== undefined ? { actual_result: actualResult } : {}),
+              ...(logFile ? { log_file: logFile } : {}),
+            }
           : c
       ),
     })),

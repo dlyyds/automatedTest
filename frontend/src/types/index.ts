@@ -144,6 +144,7 @@ export interface WsCaseCompleteMessage extends WsBaseMessage {
   status: string
   reason: string
   actual_result?: string
+  log_file?: string
 }
 
 export interface WsExecutionFinishedMessage extends WsBaseMessage {

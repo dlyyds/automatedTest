@@ -257,6 +257,44 @@ async def get_cases(request: Request, sheet: str = None):
     return cases
 
 
+@router.get("/logs/content")
+async def get_log_content(request: Request, path: str = "", run_id: str = "", case_key: str = ""):
+    """读取单条用例的实际执行日志。
+
+    优先使用显式传入的 path；否则按 case_key 从当前会话或历史记录中查找。
+    仅允许读取 logs/ 目录下的文件。
+    """
+    session = request.state.session
+    log_path = (path or "").strip()
+
+    if not log_path and case_key:
+        for c in session.test_cases:
+            if c.get("case_key") == case_key or c.get("case_id") == case_key:
+                log_path = (c.get("log_file") or "").strip()
+                break
+        if not log_path and run_id:
+            from app.core.history_store import get_history_store
+            for row in get_history_store().get_run_results(run_id):
+                if row.get("case_key") == case_key or row.get("case_id") == case_key:
+                    log_path = (row.get("log_file") or "").strip()
+                    break
+
+    if not log_path:
+        raise HTTPException(status_code=404, detail="该用例暂无可查看的执行日志")
+
+    logs_root = os.path.abspath("logs")
+    resolved = os.path.abspath(log_path)
+    if resolved != logs_root and not resolved.startswith(logs_root + os.sep):
+        raise HTTPException(status_code=400, detail="非法日志路径")
+    if not os.path.isfile(resolved):
+        raise HTTPException(status_code=404, detail="日志文件不存在（可能已被清理）")
+
+    with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    return {"path": log_path, "content": content}
+
+
 @router.post("/cases/select")
 async def select_cases(request: Request, case_ids: List[str], selected: bool = True):
     """批量选择/取消选择用例"""
@@ -421,6 +459,10 @@ def _sync_cases_to_state(session, cases):
             sc["status"] = ec.status or sc.get("status", "NT")
             if ec.actual_result:
                 sc["actual_result"] = ec.actual_result
+            if ec.log_file:
+                sc["log_file"] = ec.log_file
+            if ec.match_log_file:
+                sc["match_log_file"] = ec.match_log_file
             if ec.tester:
                 sc["tester"] = ec.tester
             if ec.test_version:

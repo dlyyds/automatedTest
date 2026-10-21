@@ -30,7 +30,12 @@ export function useWebSocket() {
         store.setProgress(data)
         break
       case 'case_complete':
-        store.updateCaseStatus(data.case_key || data.case_id, data.status, data.actual_result)
+        store.updateCaseStatus(
+          data.case_key || data.case_id,
+          data.status,
+          data.actual_result,
+          data.log_file,
+        )
         if (data.reason) {
           store.addLog({
             level: data.status === 'Fail' ? 'error' : 'info',
