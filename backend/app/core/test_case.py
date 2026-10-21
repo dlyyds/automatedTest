@@ -161,13 +161,23 @@ class WorkspaceConfig(BaseModel):
     output_dir: str = "output"
 
 
+# 旧版按供应商配置的值 → 协议（兼容已持久化的 ai_provider）
+_PROVIDER_TO_PROTOCOL = {
+    "claude": "anthropic",
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "dgx_spark": "openai",   # DGX Spark 使用 OpenAI 兼容协议
+    "ollama": "ollama",
+}
+
+
 class AIConfig(BaseModel):
-    """AI 功能配置"""
+    """AI 功能配置（只区分协议，不区分供应商）"""
     ai_enabled: bool = True
-    ai_provider: str = "claude"          # claude / openai / dgx_spark / ollama
+    ai_protocol: str = "anthropic"       # anthropic / openai / ollama
     ai_api_key: str = ""
     ai_model: str = "ts-pri-auto"        # 默认中智网关自动路由
-    ai_base_url: str = "https://llm.thundersoft.com"  # 默认中智网关
+    ai_base_url: str = "https://llm.thundersoft.com"  # 默认接入地址
     ai_auto_analyze: bool = False        # 自动分析所有 Fail
     ai_auto_parse_steps: bool = True     # 上传后自动 AI 识别测试步骤
     ai_judge_mode: str = "always"        # "off" / "uncertain" / "always"
@@ -178,9 +188,23 @@ class AIConfig(BaseModel):
     def _migrate_judge_flag(cls, data):
         """向后兼容：旧配置含 ai_judge_uncertain 时自动迁移为 ai_judge_mode。"""
         if isinstance(data, dict) and "ai_judge_uncertain" in data:
+            data = dict(data)
             flag = data.pop("ai_judge_uncertain")
             if "ai_judge_mode" not in data:
                 data["ai_judge_mode"] = "uncertain" if flag else "off"
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_provider_to_protocol(cls, data):
+        """向后兼容：旧配置的 ai_provider 迁移为 ai_protocol。"""
+        if not isinstance(data, dict):
+            return data
+        if "ai_provider" in data or "ai_protocol" in data:
+            data = dict(data)
+            legacy = data.pop("ai_provider", None)
+            protocol = data.get("ai_protocol") or legacy
+            data["ai_protocol"] = _PROVIDER_TO_PROTOCOL.get(protocol, "anthropic")
         return data
 
 

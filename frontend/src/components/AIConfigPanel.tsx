@@ -2,9 +2,9 @@
  * AI 配置面板组件。
  *
  * 功能：
- * - AI 总开关、Provider 选择（Claude/OpenAI/Ollama）
+ * - AI 总开关、协议选择（Anthropic Messages / OpenAI 兼容 / Ollama）
  * - API Key 输入（显示掩码，编辑时替换）
- * - 模型选择、自定义 URL
+ * - 模型选择、自定义 URL（决定实际接入的供应商）
  * - 连接测试
  * - AI 判定和分析的子开关
  */
@@ -22,19 +22,15 @@ import { getAIConfig, setAIConfig, testAIConnection } from '../api/axios'
 import type { AIConfig } from '../types'
 
 const { Text } = Typography
-const DGX_SPARK_BASE_URL = 'http://10.10.134.16:8081/v1'
-const DGX_SPARK_MODEL = 'ornith-1.5-35b'
-
-const PROVIDER_OPTIONS = [
-  { value: 'claude', label: 'Claude (Anthropic)' },
-  { value: 'openai', label: 'OpenAI / 兼容 API' },
-  { value: 'dgx_spark', label: 'DGX Spark LLM' },
-  { value: 'ollama', label: 'Ollama (本地模型)' },
+const PROTOCOL_OPTIONS = [
+  { value: 'anthropic', label: 'Anthropic Messages 协议' },
+  { value: 'openai', label: 'OpenAI 兼容协议（Chat Completions）' },
+  { value: 'ollama', label: 'Ollama 原生协议（/api/chat）' },
 ]
 
 const MODEL_PRESETS: Record<string, { value: string; label: string }[]> = {
-  claude: [
-    // —— 中智 ThunderSoft 网关模型（需配合 https://llm.thundersoft.com）——
+  anthropic: [
+    // —— 中智网关模型（需配合 https://llm.thundersoft.com）——
     { value: 'ts-pri-auto', label: 'TS 自动路由 (推荐·均衡)' },
     { value: 'ts-gpt-55', label: 'TS GPT-5.5' },
     { value: 'ts-opus-46', label: 'TS Claude Opus 4.6 (最强)' },
@@ -47,14 +43,11 @@ const MODEL_PRESETS: Record<string, { value: string; label: string }[]> = {
     { value: 'claude-opus-4-20250514', label: 'Claude Opus 4 (Anthropic 直连)' },
   ],
   openai: [
-    { value: 'ornith-1.5-35b-a3b-nvfp4', label: 'Ornith 1.5 35B A3B NVFP4（兼容 API）' },
+    { value: 'ornith-1.5-35b-a3b-nvfp4', label: 'Ornith 1.5 35B A3B NVFP4' },
+    { value: 'ornith-1.5-35b', label: 'Ornith 1.5 35B' },
     { value: 'gpt-4o-mini', label: 'GPT-4o Mini (推荐·快速)' },
     { value: 'gpt-4o', label: 'GPT-4o' },
     { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
-  ],
-  dgx_spark: [
-    { value: 'ornith-1.5-35b', label: 'Ornith 1.5 35B（文档推荐）' },
-    { value: 'ornith-1.5-35b-a3b-nvfp4', label: 'Ornith 1.5 35B A3B NVFP4' },
   ],
   ollama: [
     { value: 'qwen2.5:7b', label: 'Qwen2.5 7B (推荐)' },
@@ -72,17 +65,7 @@ export default function AIConfigPanel() {
   const [config, setConfig] = useState<AIConfig | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const currentProvider = Form.useWatch('ai_provider', form) || 'claude'
-
-  const handleProviderChange = (provider: string) => {
-    if (provider === 'dgx_spark') {
-      form.setFieldsValue({
-        ai_provider: provider as AIConfig['ai_provider'],
-        ai_model: DGX_SPARK_MODEL,
-        ai_base_url: DGX_SPARK_BASE_URL,
-      })
-    }
-  }
+  const currentProtocol = Form.useWatch('ai_protocol', form) || 'anthropic'
 
   const getErrorMessage = (err: unknown, fallback: string) => {
     if (isAxiosError<{ detail?: string }>(err)) {
@@ -220,18 +203,18 @@ export default function AIConfigPanel() {
 
         <Divider style={{ margin: '12px 0' }} />
 
-        {/* Provider 选择 */}
+        {/* 协议选择（供应商由 URL + 模型决定） */}
         <Form.Item
-          name="ai_provider"
-          label="AI 服务商"
+          name="ai_protocol"
+          label="AI 协议"
           rules={[{ required: true }]}
-          style={{ maxWidth: 320 }}
+          style={{ maxWidth: 360 }}
         >
-          <Select options={PROVIDER_OPTIONS} onChange={handleProviderChange} />
+          <Select options={PROTOCOL_OPTIONS} />
         </Form.Item>
 
-        {/* API Key（Claude/OpenAI 需要，Ollama 不需要）*/}
-        {currentProvider !== 'ollama' && (
+        {/* API Key（Anthropic/OpenAI 兼容需要，Ollama 不需要）*/}
+        {currentProtocol !== 'ollama' && (
           <Form.Item
             name="ai_api_key"
             label="API Key"
@@ -254,7 +237,7 @@ export default function AIConfigPanel() {
           extra={<Text type="secondary" style={{ fontSize: 12 }}>可直接输入任意模型名称，不限于预设列表</Text>}
         >
           <AutoComplete
-            options={MODEL_PRESETS[currentProvider] || []}
+            options={MODEL_PRESETS[currentProtocol] || []}
             allowClear
             placeholder="选择预设或输入自定义模型名称"
             filterOption={(inputValue, option) => {
@@ -265,23 +248,24 @@ export default function AIConfigPanel() {
           />
         </Form.Item>
 
-        {/* 自定义 URL（主要给 Ollama、DGX Spark 和代理用）*/}
+        {/* 接入地址：与协议、模型共同决定实际供应商 */}
         <Form.Item
           name="ai_base_url"
           label={
-            <Tooltip title="DGX Spark LLM 填 http://10.10.134.16:8081/v1；如模型列表可见但不可用，可按文档尝试 http://10.10.134.16:8081">
-              自定义 API URL
+            <Tooltip title="接入哪个供应商由 协议 + 地址 + 模型 共同决定：Anthropic 网关填 https://llm.thundersoft.com；OpenAI 兼容服务填以 /v1 结尾的地址；Ollama 填服务根地址。">
+              接入地址（Base URL）
             </Tooltip>
           }
-          style={{ maxWidth: 400 }}
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>留空则使用协议默认地址</Text>}
+          style={{ maxWidth: 420 }}
         >
           <Input
             placeholder={
-              currentProvider === 'ollama'
+              currentProtocol === 'ollama'
                 ? 'http://localhost:11434（默认）'
-                : currentProvider === 'dgx_spark'
-                  ? DGX_SPARK_BASE_URL
-                  : 'https://llm.thundersoft.com（中智网关）或留空用官方 API'
+                : currentProtocol === 'openai'
+                  ? '留空用 https://api.openai.com/v1；兼容端点如 http://10.10.134.16:8081/v1'
+                  : '留空用 Anthropic 官方地址；网关如 https://llm.thundersoft.com'
             }
           />
         </Form.Item>

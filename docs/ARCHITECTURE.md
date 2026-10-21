@@ -159,7 +159,7 @@ test_runner_web/
 │   │   │   └── case_generator.py    # 矩阵驱动的用例骨架生成器（规则模板）
 │   │   ├── ai/                      # AI 能力层（判定/分析/报告/步骤解析/用例生成）
 │   │   │   ├── service.py
-│   │   │   ├── providers/           # claude / openai_compat / ollama
+│   │   │   ├── providers/           # anthropic / openai / ollama（按协议区分）
 │   │   │   ├── prompts/             # judge / analyze / report / parse_steps / generate_cases
 │   │   │   └── cache.py
 │   │   └── websocket/manager.py

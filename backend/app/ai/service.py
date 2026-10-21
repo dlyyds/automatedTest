@@ -2,8 +2,8 @@
 AI Service 主入口。
 
 提供统一的 AI 调用接口：结果判定、失败分析、报告生成、测试步骤解析。
-支持多 Provider（Claude / OpenAI / Ollama）和结果缓存。
-AI 功能关闭或调用失败时安全降级，不影响主流程。
+按协议选择实现（Anthropic Messages / OpenAI Chat Completions / Ollama），
+供应商差异由 base_url、model、api_key 决定。AI 功能关闭或调用失败时安全降级。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Optional
 
 from .cache import AICache
 from .providers.base import BaseProvider, LLMResponse
-from .providers.claude_provider import ClaudeProvider
+from .providers.anthropic_provider import AnthropicProvider
 from .providers.openai_provider import OpenAIProvider
 from .providers.ollama_provider import OllamaProvider
 from .prompts import judge as judge_prompt
@@ -24,6 +24,15 @@ from .prompts import step_parse as step_parse_prompt
 from .prompts import generate_cases as generate_cases_prompt
 from .prompts import req_parse as req_parse_prompt
 from .prompts import arch_design as arch_design_prompt
+
+# 兼容旧配置中的供应商名，统一映射到协议
+_PROTOCOL_ALIASES = {
+    "claude": "anthropic",
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "dgx_spark": "openai",
+    "ollama": "ollama",
+}
 
 
 class AIService:
@@ -41,7 +50,7 @@ class AIService:
 
         config 字段:
             ai_enabled: bool          AI 总开关
-            ai_provider: str          claude / openai / dgx_spark / ollama
+            ai_protocol: str          anthropic / openai / ollama
             ai_api_key: str           API Key
             ai_model: str             默认模型
             ai_base_url: str          自定义 URL（Ollama/自定义端点）
@@ -63,32 +72,26 @@ class AIService:
         if not self.enabled:
             return None
 
-        provider_name = self.config.get("ai_provider", "claude")
+        # 只按协议选择实现；base_url / model 决定实际接入哪个供应商
+        protocol = self.config.get("ai_protocol") or self.config.get("ai_provider", "anthropic")
+        protocol = _PROTOCOL_ALIASES.get(protocol, protocol)
         api_key = self.config.get("ai_api_key", "")
         base_url = self.config.get("ai_base_url", "")
         model = self.config.get("ai_model", "")
 
-        if provider_name == "claude":
+        if protocol == "anthropic":
             if not api_key:
                 return None
-            self._provider = ClaudeProvider(
+            self._provider = AnthropicProvider(
                 api_key=api_key, base_url=base_url, default_model=model
             )
-        elif provider_name == "openai":
+        elif protocol == "openai":
             if not api_key:
                 return None
             self._provider = OpenAIProvider(
                 api_key=api_key, base_url=base_url, default_model=model
             )
-        elif provider_name == "dgx_spark":
-            if not api_key:
-                return None
-            self._provider = OpenAIProvider(
-                api_key=api_key,
-                base_url=base_url or "http://10.10.134.16:8081/v1",
-                default_model=model or "ornith-1.5-35b",
-            )
-        elif provider_name == "ollama":
+        elif protocol == "ollama":
             self._provider = OllamaProvider(
                 base_url=base_url, default_model=model
             )

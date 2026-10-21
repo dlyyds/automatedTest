@@ -1,7 +1,7 @@
 """
-Claude API Provider。
+Anthropic Messages 协议 Provider。
 
-使用 Anthropic 官方 SDK 调用 Claude 系列模型。
+使用 Anthropic 官方 SDK 调用采用该协议的模型/网关。
 """
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from typing import Optional
 from .base import BaseProvider, LLMResponse
 
 
-class ClaudeProvider(BaseProvider):
-    """Anthropic Claude API Provider。"""
+class AnthropicProvider(BaseProvider):
+    """Anthropic Messages 协议 Provider。"""
 
-    name = "claude"
+    name = "anthropic"
 
     # 模型别名映射 → 完整 model ID
     _MODEL_ALIASES = {
@@ -94,7 +94,7 @@ class ClaudeProvider(BaseProvider):
             return LLMResponse(
                 content="",
                 model=use_model,
-                error=f"Claude API 调用失败: {type(e).__name__}: {e}",
+                error=f"Anthropic 协议调用失败: {type(e).__name__}: {e}",
             )
 
     async def test_connection(self) -> tuple[bool, str]:
@@ -119,7 +119,7 @@ class ClaudeProvider(BaseProvider):
                 max_tokens=64,
             )
             if resp.ok:
-                return True, f"Claude 连接成功 (model: {resp.model})"
+                return True, f"Anthropic 协议连接成功 (model: {resp.model})"
             return False, resp.error or "未知错误"
         except Exception as e:
-            return False, f"Claude 连接失败: {e}"
+            return False, f"Anthropic 协议连接失败: {e}"

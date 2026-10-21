@@ -39,7 +39,7 @@ test_runner_web/
 │   │   │   └── zip_utils.py          # 安全 zip 解压工具
 │   │   ├── ai/                       # AI 能力层（判定/分析/报告/步骤解析）
 │   │   │   ├── service.py
-│   │   │   ├── providers/            # claude / openai_compat / ollama
+│   │   │   ├── providers/            # anthropic / openai / ollama（按协议区分）
 │   │   │   ├── prompts/              # judge / analyze / report / parse_steps
 │   │   │   └── cache.py
 │   │   └── websocket/
@@ -161,10 +161,10 @@ AI 功能通过侧边导航的「AI 配置」页面统一管理：
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| Provider | claude | claude / openai / ollama |
-| API Key | — | 对应 Provider 的密钥 |
+| AI 协议 | anthropic | anthropic / openai / ollama |
+| API Key | — | Anthropic、OpenAI 兼容协议需要；Ollama 不需要 |
 | 模型 | ts-pri-auto | 默认中智网关自动路由 |
-| Base URL | llm.thundersoft.com | 中智网关地址 |
+| 接入地址 | llm.thundersoft.com | 与协议、模型共同决定实际供应商；留空用协议默认地址 |
 | AI 判定模式 | always | off / uncertain / always（AI 有结果时优先采用） |
 | AI 自动解析步骤 | 开 | 上传 Excel 后自动触发 |
 | AI 自动分析失败 | 关 | 失败用例自动根因分析 |

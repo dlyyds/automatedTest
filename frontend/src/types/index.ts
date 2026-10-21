@@ -190,7 +190,7 @@ export type WsOutgoingMessage = StopExecutionMessage | ConfirmResponseMessage
 
 export interface AIConfig {
   ai_enabled: boolean
-  ai_provider: 'claude' | 'openai' | 'dgx_spark' | 'ollama'
+  ai_protocol: 'anthropic' | 'openai' | 'ollama'
   ai_api_key: string
   ai_api_key_masked?: string
   ai_model: string
