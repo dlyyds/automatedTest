@@ -1140,7 +1140,7 @@ class ExecutorAdapter:
         """\u4ece\u6267\u884c\u7ed3\u679c\u548c\u5339\u914d\u539f\u56e0\u4e2d\u63d0\u53d6\u5173\u952e\u8bc1\u636e\u6458\u8981\u3002
 
         \u751f\u6210\u683c\u5f0f: [Pass/Fail/\u5f85\u786e\u8ba4] \u5224\u5b9a\u4f9d\u636e | \u5173\u952e\u8f93\u51fa\u884c
-        \u82e5\u7531 AI \u5224\u5b9a\uff0c\u4f18\u5148\u5c55\u793a AI \u751f\u6210\u7684\u5224\u5b9a\u4f9d\u636e\u4e0e\u8bc1\u636e\u3002
+        \u82e5\u7531 AI \u5224\u5b9a\uff0c\u5c55\u793a AI \u5224\u5b9a\u72b6\u6001\u4e0e\u7406\u7531\uff08\u4e0d\u542b\u7f6e\u4fe1\u5ea6\u548c\u8bc1\u636e\u660e\u7ec6\uff09\u3002
         \u7528\u4e8e\u524d\u7aef\u5c55\u793a\u548c Excel \u56de\u5199\uff0c\u4f7f\u5224\u5b9a\u4f9d\u636e\u4e00\u76ee\u4e86\u7136\u3002
         """
         import re
@@ -1154,18 +1154,11 @@ class ExecutorAdapter:
         reason_summary = ""
         ai_judged = getattr(result, "ai_judged", False)
         ai_reason = getattr(result, "ai_reason", "") or ""
-        ai_evidence = getattr(result, "ai_evidence", []) or []
         if ai_judged:
-            ai_confidence = float(getattr(result, "ai_confidence", 0.0) or 0.0)
             ai_status = getattr(result, "ai_status", "") or ""
-            reason_text = ai_reason or "(AI \u672a\u63d0\u4f9b\u6587\u5b57\u8bf4\u660e)"
-            reason_summary = (
-                f"[AI\u5224\u5b9a] {ai_status} \u5224\u5b9a\u4f9d\u636e(\u7f6e\u4fe1\u5ea6={ai_confidence:.2f}): "
-                f"{reason_text}"
-            )
-            if ai_evidence:
-                evidence_text = "\n".join(f"- {str(e)}" for e in ai_evidence[:5])
-                reason_summary += f"\nAI \u8bc1\u636e:\n{evidence_text}"
+            reason_text = ai_reason or "(AI 未提供文字说明)"
+            # 实际结果栏仅展示 AI 判定状态与理由，不展示置信度和证据明细
+            reason_summary = f"[AI判定] {ai_status} 判定依据: {reason_text}"
         elif passed is not True and error_msg:
             # \u6267\u884c\u5f02\u5e38\u76f4\u63a5\u7528 error_msg
             reason_summary = error_msg[:150]
@@ -1340,17 +1333,7 @@ class ExecutorAdapter:
             if ai_judged or not (interactive_output_lines and is_generic_reason):
                 parts.append(reason_summary)
         if evidence_lines:
-            if ai_judged:
-                # AI 证据已在 reason_summary 中展示，避免关键输出行重复
-                ai_evidence_set = {str(e).strip() for e in ai_evidence}
-                unique_lines = [
-                    line for line in evidence_lines
-                    if line.strip() and line.strip() not in ai_evidence_set
-                ]
-                if unique_lines:
-                    parts.append("\n".join(unique_lines))
-            else:
-                parts.append("\n".join(evidence_lines))
+            parts.append("\n".join(evidence_lines))
 
         if parts:
             separator = "\n" if ai_judged else " | "

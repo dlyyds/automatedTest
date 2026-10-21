@@ -454,7 +454,14 @@ async def start_execution(request: Request, payload: Optional[ExecuteRequest] = 
     session = request.state.session
 
     if session.is_running:
-        raise HTTPException(status_code=400, detail="执行已在进行中")
+        # 兼容历史异常遗留的“僵尸运行态”：后台任务已是终态（finished/failed/stopped）
+        # 但 is_running 未复位时，自动清理后允许启动下一次执行。
+        task_status = (session.current_task.status or "") if session.current_task else ""
+        if task_status in ("finished", "failed", "stopped"):
+            session.is_running = False
+            session.executor = None
+        else:
+            raise HTTPException(status_code=400, detail="执行已在进行中")
 
     if not session.test_cases:
         raise HTTPException(status_code=400, detail="请先上传用例文件")
@@ -520,8 +527,6 @@ def _sync_cases_to_state(session, cases):
                 sc["actual_result"] = ec.actual_result
             if ec.log_file:
                 sc["log_file"] = ec.log_file
-            if ec.match_log_file:
-                sc["match_log_file"] = ec.match_log_file
             if ec.tester:
                 sc["tester"] = ec.tester
             if ec.test_version:
@@ -654,12 +659,17 @@ async def _run_execution(session):
             "message": f"执行异常: {e}",
         })
     finally:
-        # 无论正常结束、用户停止、还是异常退出，都将已执行的结果同步回 state
-        if cases:
-            _sync_cases_to_state(session, cases)
+        # 先复位运行态，再做结果同步：同步中的异常绝不能让 is_running 卡在 True，
+        # 否则用户结束一次测试后无法再启动下一次（提示"执行已在进行中"）。
         session.is_running = False
         session._stop_requested = False
         session.executor = None
+        # 无论正常结束、用户停止、还是异常退出，都将已执行的结果同步回 state
+        if cases:
+            try:
+                _sync_cases_to_state(session, cases)
+            except Exception as sync_err:
+                print(f"[WARN] 同步执行结果到会话失败: {sync_err}")
         if ssh:
             try:
                 ssh.disconnect()
