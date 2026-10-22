@@ -455,6 +455,10 @@ class ExcelHandler:
             cell = ws.cell(row=row, column=rcm['actual_result'])
             cell.value = tc.status
 
+            # Append execution log/evidence summary below status when available
+            if tc.actual_result:
+                cell.value = f"{tc.status}\n{tc.actual_result}"
+
             if tc.status in self.STATUS_COLORS:
                 cell.fill = PatternFill(
                     start_color=self.STATUS_COLORS[tc.status],
