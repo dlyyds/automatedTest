@@ -30,7 +30,13 @@ import {
   uploadExcel,
   analyzeAllFailures,
   aiParseSteps,
+  setWorkspace as apiSetWorkspace,
 } from '../api/axios'
+import {
+  isWorkspaceConfigChanged,
+  loadStoredWorkspace,
+  mergeWorkspaceConfig,
+} from '../utils/workspaceStorage'
 import type { TestCase, AIAnalysis, AIParsedStep } from '../types'
 
 const { Text } = Typography
@@ -127,7 +133,17 @@ export default function Dashboard() {
       const sshStatus = await getSSHStatus()
       store.setSSHConfig(ssh.data)
       store.setSSHStatus(sshStatus.data)
-      store.setWorkspace(workspace.data)
+      // 浏览器本地保存的工作区配置优先，并同步到后端供执行使用
+      const storedWorkspace = loadStoredWorkspace()
+      const mergedWorkspace = mergeWorkspaceConfig(workspace.data, storedWorkspace)
+      store.setWorkspace(mergedWorkspace)
+      if (storedWorkspace && isWorkspaceConfigChanged(mergedWorkspace, workspace.data)) {
+        try {
+          await apiSetWorkspace(mergedWorkspace)
+        } catch (syncError) {
+          console.warn('[Dashboard] 同步工作区配置到后端失败', syncError)
+        }
+      }
     } catch (error) {
       message.warning(getErrorMessage(error, '加载配置失败'))
     }
@@ -667,8 +683,14 @@ export default function Dashboard() {
             percent={Math.round((store.progress!.current / store.progress!.total) * 100)}
             format={() => `${store.progress!.current}/${store.progress!.total}`}
             strokeColor="#2f54eb"
+            status={store.progress!.message ? 'active' : 'normal'}
           />
-          <Text type="secondary">当前: {store.progress!.case_id}</Text>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <Text style={{ flex: 1, minWidth: 0 }} ellipsis={{ tooltip: store.progress!.message }}>
+              {store.progress!.message || '正在执行'}
+            </Text>
+            <Text type="secondary">当前用例: {store.progress!.case_id}</Text>
+          </div>
         </Card>
       )}
 

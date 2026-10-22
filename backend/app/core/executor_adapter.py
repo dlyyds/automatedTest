@@ -90,6 +90,29 @@ class ExecutorAdapter:
         self._image_path_checked = False
         self._ai_service = ai_service  # AI 判定服务（可选）
         self._ai_parsed_steps = ai_parsed_steps or {}  # AI 预解析步骤缓存
+        # 当前用例的执行进度上下文（用于推送细分阶段到前端进度条）
+        self._progress_current = 0
+        self._progress_total = 0
+        self._progress_case_id = ""
+        self._progress_case_key = ""
+
+    async def _send_progress(self, message: str):
+        """推送当前用例的细分执行阶段（沿用用例级 current/total）。"""
+        if not self._progress_total:
+            return
+        await self.ws.send_progress(
+            self._progress_current, self._progress_total,
+            self._progress_case_id, self._progress_case_key, message,
+        )
+
+    @staticmethod
+    def _step_progress_message(prefix: str, index: int, total: int, command: str = "") -> str:
+        """构造带步骤序号的阶段文案，命令过长时截断。"""
+        cmd = " ".join((command or "").split())
+        if len(cmd) > 60:
+            cmd = cmd[:57] + "..."
+        text = f"{prefix} ({index}/{total})"
+        return f"{text}: {cmd}" if cmd else text
 
     def stop(self):
         self._stop = True
@@ -107,7 +130,11 @@ class ExecutorAdapter:
                 await self.ws.send_log("执行被用户停止", "warning")
                 break
 
-            await self.ws.send_progress(idx, total, case.case_id, case.case_key)
+            self._progress_current = idx
+            self._progress_total = total
+            self._progress_case_id = case.case_id
+            self._progress_case_key = case.case_key
+            await self._send_progress("正在开始执行用例")
             result = await self._execute_single(case, run_prerequisites)
             results.append(result)
             await self.ws.send_case_complete(
@@ -140,6 +167,7 @@ class ExecutorAdapter:
 
         # 前置条件
         if run_prerequisites and case.prerequisites:
+            await self._send_progress("正在执行前置条件")
             await self.ws.send_log(f"[{case.case_id}] 执行前置条件...", "info")
             ok, prereq_output = await self._run_prerequisites(case.prerequisites)
             if not ok:
@@ -157,6 +185,7 @@ class ExecutorAdapter:
                 return result
 
         # 执行测试步骤
+        await self._send_progress("正在解析测试步骤")
         await self.ws.send_log(f"[{case.case_id}] 执行测试步骤...", "info")
         log_file = f"{self.log_dir}/{case.case_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         os.makedirs(self.log_dir, exist_ok=True)
@@ -180,6 +209,7 @@ class ExecutorAdapter:
             case_key = case.case_key or f"{case.source_sheet}:{case.row_number}:{case.case_id}"
             # 优先使用预解析缓存
             if case_key not in self._ai_parsed_steps:
+                await self._send_progress("正在 AI 解析测试步骤")
                 try:
                     parsed = await asyncio.wait_for(
                         self._ai_service.parse_steps(
@@ -282,7 +312,7 @@ class ExecutorAdapter:
                         last_cmd = "blocking_nvsipl_single"
                 else:
                     # 普通顺序执行模式
-                    for step in steps:
+                    for step_idx, step in enumerate(steps, 1):
                         if self._stop:
                             await self.ws.send_log(f"[{case.case_id}] 执行被用户停止", "warning")
                             break
@@ -323,6 +353,8 @@ class ExecutorAdapter:
                             continue
 
                         if step.kind == "command":
+                            await self._send_progress(self._step_progress_message(
+                                "正在执行命令", step_idx, len(steps), step.command))
                             shell_cmd = self._normalize_quotes(step.command)
                             shell_cmd = self._apply_nito_override(shell_cmd)
                             shell_cmd = self._apply_image_path_override(shell_cmd)
@@ -337,6 +369,8 @@ class ExecutorAdapter:
                                 shell_cmd = f"cd {work_dir} && {shell_cmd}"
                             last_cmd = shell_cmd
                             await self.ws.send_log(f"[{case.case_id}] [{step.terminal}] 执行: {shell_cmd}", "info")
+                            # 日志中回显输入的命令（以 "$ " 开头，判定前会被移除）
+                            combined_outputs.append(f"$ {shell_cmd}")
 
                             # nvsipl_camera 需要 TTY 才能正常交互和初始化
                             needs_tty = CommandParser.is_nvsipl_camera_command(step.command)
@@ -388,11 +422,14 @@ class ExecutorAdapter:
                         f"\n[文件数量检查] 找到 0 个文件 "
                         f"< 预期 {criteria.file_count} 个: FAIL")
 
-            result.actual_output = combined
+            # 日志保留输入的命令回显；判定/证据提取使用去掉回显后的输出
             self._write_case_log(case, result, combined, log_file=log_file)
+            combined = self._strip_command_echoes(combined)
+            result.actual_output = combined
 
             # 预期结果匹配
             # 判断用例类型并选择对应的匹配策略
+            await self._send_progress("正在分析执行输出")
             from app.core.frame_sync_checker import FrameSyncChecker
 
             # 优先级 1: 嵌入行信息人工确认（预期含曝光/增益/帧序号关键字 + metadata 输出）
@@ -468,6 +505,7 @@ class ExecutorAdapter:
                     should_ai_judge = True
 
                 if should_ai_judge:
+                    await self._send_progress("正在 AI 分析判定结果")
                     try:
                         rule_status = "Pass" if passed else ("Fail" if passed is False else "Review")
                         rule_conf = match_result.confidence
@@ -579,6 +617,7 @@ class ExecutorAdapter:
 
                 if not ai_judge_attempted:
                     reason += f"; [规则置信度={match_result.confidence:.2f}]"
+            await self._send_progress("正在生成判定结果")
             result.match_reason = reason
             result.match_log_file = log_file
 
@@ -649,7 +688,7 @@ class ExecutorAdapter:
         elif hasattr(result, '_sr_hs_log') and result._sr_hs_log:
             # sr/hs 用例：提取有效输出作为实际结果
             sr_hs_lines = []
-            for line in result._sr_hs_log.split('\n'):
+            for line in self._strip_command_echoes(result._sr_hs_log).split('\n'):
                 stripped = line.strip()
                 if not stripped:
                     continue
@@ -683,6 +722,16 @@ class ExecutorAdapter:
         result.log_file = log_file
         case.log_file = log_file
         return log_file
+
+    @staticmethod
+    def _strip_command_echoes(text: str) -> str:
+        """移除日志中的命令回显行（以 ``$ `` 开头）。
+
+        命令回显只用于执行日志展示，不参与预期匹配、证据提取与 AI 判定。
+        """
+        return "\n".join(
+            line for line in text.split("\n") if not line.startswith("$ ")
+        )
 
     def preview_commands(self, case: TestCase, ai_parsed_steps=None) -> dict:
         """预览某条用例将要下发到远端的命令（不连接 SSH、不执行任何命令）。
@@ -1012,6 +1061,7 @@ class ExecutorAdapter:
             if driver_export:
                 await _send_cmd(driver_export)
                 await _read_shell(3.0, stop_pattern=r"[#\$>]\s*$")
+                combined_outputs.append(f"$ {driver_export}")
                 await self.ws.send_log(
                     f"[{case.case_id}] [持久Shell] 设置驱动库路径: {driver_export}", "info")
 
@@ -1054,6 +1104,8 @@ class ExecutorAdapter:
                     continue
 
                 if step.kind == "command":
+                    await self._send_progress(self._step_progress_message(
+                        "正在执行命令", step_idx + 1, len(resolved_steps), step.command))
                     shell_cmd = self._normalize_quotes(step.command)
                     shell_cmd = self._apply_nito_override(shell_cmd)
                     shell_cmd = self._apply_image_path_override(shell_cmd)
@@ -1079,6 +1131,7 @@ class ExecutorAdapter:
                         await self.ws.send_log(
                             f"[{case.case_id}] [持久Shell] [{step_idx+1}] 执行 nvsipl: {shell_cmd}", "info")
                         last_cmd = shell_cmd
+                        combined_outputs.append(f"$ {shell_cmd}")
                         await _send_cmd(shell_cmd)
 
                         # 等待 nvsipl 初始化 — 双信号检测（gc提示 或 Frame rate）
@@ -1116,6 +1169,7 @@ class ExecutorAdapter:
                         await self.ws.send_log(
                             f"[{case.case_id}] [持久Shell] [{step_idx+1}] 执行: {shell_cmd}", "info")
                         last_cmd = shell_cmd
+                        combined_outputs.append(f"$ {shell_cmd}")
                         await _send_cmd(shell_cmd)
                         # 等待命令完成（提示符出现）
                         cmd_output = await _read_shell(10.0, stop_pattern=r"[#\$>]\s*$")
@@ -1155,7 +1209,8 @@ class ExecutorAdapter:
         import re
 
         status_label = "[Pass]" if passed is True else ("[\u5f85\u786e\u8ba4]" if passed is None else "[Fail]")
-        actual = result.actual_output or ""
+        # \u5b9e\u9645\u7ed3\u679c\u6587\u672c\u4e0d\u5c55\u793a\u547d\u4ee4\u56de\u663e\uff08\u547d\u4ee4\u4ec5\u4fdd\u7559\u5728\u65e5\u5fd7\u6587\u4ef6\u4e2d\uff09
+        actual = ExecutorAdapter._strip_command_echoes(result.actual_output or "")
         reason = result.match_reason or ""
         error_msg = result.error_msg or ""
 
@@ -1592,10 +1647,8 @@ class ExecutorAdapter:
         兼容用 ``;`` 分隔的多条命令。
         """
         outputs: list[str] = []
-        for cmd in prereq.split(";"):
-            cmd = cmd.strip()
-            if not cmd:
-                continue
+        cmds = [c.strip() for c in prereq.split(";") if c.strip()]
+        for idx, cmd in enumerate(cmds, 1):
             if cmd.startswith(CommandParser.MANUAL_CONFIRM_PREFIX):
                 desc = cmd.replace(CommandParser.MANUAL_CONFIRM_PREFIX, "").strip()
                 ok = await self.ws.request_manual_confirm(desc)
@@ -1603,6 +1656,8 @@ class ExecutorAdapter:
                 if not ok:
                     return False, "\n".join(outputs)
             else:
+                await self._send_progress(self._step_progress_message(
+                    "正在执行前置条件", idx, len(cmds), cmd))
                 cmd = self._apply_driver_lib_path(cmd)
                 await self.ws.send_log(f"前置条件执行: {cmd}", "info")
                 exit_code, stdout, stderr = await self._ssh_execute(cmd, timeout=60)
@@ -1624,6 +1679,7 @@ class ExecutorAdapter:
         4. 返回文件列表文本供关键字匹配
         """
         try:
+            await self._send_progress("正在检查生成文件")
             find_cmd = f"find {work_dir} -maxdepth 1 -name '*{file_ext}' -mmin -3 2>/dev/null | head -20"
             exit_code, stdout, _ = await self._ssh_execute(find_cmd, timeout=15)
             files = [f.strip() for f in stdout.strip().split('\n') if f.strip()]
@@ -1652,6 +1708,8 @@ class ExecutorAdapter:
         download_path = getattr(self.workspace, "image_download_path", "")
         if not download_path:
             return
+
+        await self._send_progress(f"正在下载图片到本机 ({len(remote_files)} 个文件)")
 
         import subprocess
         import shlex
@@ -1949,6 +2007,7 @@ class ExecutorAdapter:
                 break
 
             round_label = f"第{round_idx + 1}/{repeat_count}轮"
+            await self._send_progress(f"正在执行命令 ({round_label})")
             await self.ws.send_log(
                 f"[{case.case_id}] [并行模式] === {round_label} 开始 ===", "info")
 
@@ -1962,6 +2021,7 @@ class ExecutorAdapter:
             current_round_steps = all_subsequent if round_idx == 0 else repeat_round_steps
 
             # Step 1: 打开 PTY channel
+            combined_outputs.append(f"$ {full_cmd}")
             channel = await loop.run_in_executor(
                 None, lambda: self.ssh.open_interactive_channel(full_cmd, timeout=180)
             )
@@ -2106,6 +2166,8 @@ class ExecutorAdapter:
                             sub_cmd = sub_cmd.strip().lower()
                             if not sub_cmd or self._stop or pty_broken:
                                 continue
+
+                            combined_outputs.append(f"$ {sub_cmd}")
 
                             # q 命令：先等待出帧稳定，再发送退出
                             if sub_cmd == 'q':
@@ -2309,6 +2371,7 @@ class ExecutorAdapter:
                         last_cmd = shell_cmd
                         await self.ws.send_log(
                             f"[{case.case_id}] [并行模式] [{round_label}] SSH执行: {shell_cmd}", "info")
+                        combined_outputs.append(f"$ {shell_cmd}")
 
                         exit_code, stdout, stderr = await self._ssh_execute(shell_cmd, timeout=60)
                         last_exit_code = exit_code

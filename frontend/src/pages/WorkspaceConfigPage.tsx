@@ -9,6 +9,12 @@ import {
 import { SaveOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import { useStore } from '../stores/useStore'
 import { getWorkspace, setWorkspace as apiSetWorkspace } from '../api/axios'
+import {
+  isWorkspaceConfigChanged,
+  loadStoredWorkspace,
+  mergeWorkspaceConfig,
+  saveStoredWorkspace,
+} from '../utils/workspaceStorage'
 import type { WorkspaceConfig } from '../types'
 
 export default function WorkspaceConfigPage() {
@@ -22,8 +28,24 @@ export default function WorkspaceConfigPage() {
       try {
         const res = await getWorkspace()
         if (cancelled) return
-        setWorkspace(res.data)
-        form.setFieldsValue(res.data)
+        // 浏览器本地保存的配置优先（新标签页/浏览器重启后恢复）
+        const stored = loadStoredWorkspace()
+        const merged = mergeWorkspaceConfig(res.data, stored)
+        setWorkspace(merged)
+        form.setFieldsValue(merged)
+        // 同步到后端，确保执行时使用同一份配置
+        if (stored && isWorkspaceConfigChanged(merged, res.data)) {
+          try {
+            await apiSetWorkspace(merged)
+          } catch (syncErr) {
+            if (!cancelled) {
+              const msg = isAxiosError(syncErr)
+                ? syncErr.response?.data?.detail || syncErr.message
+                : '同步配置到后端失败'
+              message.warning(`本地配置已恢复，但${msg}`)
+            }
+          }
+        }
       } catch (err) {
         if (!cancelled) {
           const msg = isAxiosError(err) ? err.response?.data?.detail || err.message : '加载配置失败'
@@ -39,6 +61,7 @@ export default function WorkspaceConfigPage() {
     setSaving(true)
     try {
       await apiSetWorkspace(values)
+      saveStoredWorkspace(values)
       setWorkspace(values)
       message.success('工作区配置已保存')
     } catch (err) {

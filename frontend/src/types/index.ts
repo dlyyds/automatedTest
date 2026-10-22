@@ -89,6 +89,8 @@ export interface ExecutionProgress {
   case_key?: string
   total: number
   case_id: string
+  /** 当前细分执行阶段，如「正在执行命令」「正在 AI 分析判定结果」 */
+  message?: string
 }
 
 export interface ConfirmRequest {

@@ -429,6 +429,7 @@ li code {
   <h2 id="workspace">工作区配置</h2>
   <div class="section">
     <p>点击工具栏「工作区配置」按钮，设置执行参数和路径覆盖规则。</p>
+    <div class="note">配置保存后会同时写入浏览器本地存储，刷新页面、新开标签页或重启浏览器后会自动恢复，并同步到后端供执行使用。</div>
 
     <div class="card">
       <div class="card-title"><span class="icon icon-blue">◇</span>基础配置</div>
@@ -489,7 +490,7 @@ li code {
 
     <h3>执行过程</h3>
     <ul>
-      <li>顶部进度条实时显示当前进度和正在执行的用例 ID</li>
+      <li>顶部进度条实时显示当前进度、用例 ID 和细分执行阶段（如「正在执行命令 (2/5)」「正在 AI 分析判定结果」）</li>
       <li>底部日志面板实时推送命令输出、匹配判定、错误信息</li>
       <li>用例表格中状态列实时更新（Running → Pass/Fail/Review）</li>
       <li>可随时点击「停止执行」终止（当前命令会被强制中断）</li>

@@ -46,14 +46,16 @@ class SessionWSManager:
             "timestamp": int(time.time() * 1000),
         })
 
-    async def send_progress(self, current: int, total: int, case_id: str, case_key: str = ""):
-        """发送进度更新"""
+    async def send_progress(self, current: int, total: int, case_id: str,
+                            case_key: str = "", message: str = ""):
+        """发送进度更新（message 用于展示当前执行阶段，如"正在执行命令"）"""
         await self.broadcast({
             "type": "progress",
             "current": current,
             "total": total,
             "case_id": case_id,
             "case_key": case_key,
+            "message": message,
         })
 
     async def send_case_complete(self, case_id: str, status: str, reason: str = "",
