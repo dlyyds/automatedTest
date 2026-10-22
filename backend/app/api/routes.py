@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from app.core.test_case import TestCase, SSHConfig, SSHStatus, WorkspaceConfig, AIConfig, CleanupConfig
 from app.core.execution_state import ExecutionTask
 from app.core.ssh_manager import SSHManager
-from app.core.config_store import ConfigStore
+from app.core.config_store import ConfigStore, AIProfileStore, AIProfileEntry
 from app.core.command_parser import CommandParser, CommandStep
 
 router = APIRouter()
@@ -29,6 +29,8 @@ router = APIRouter()
 # AI 配置使用全局 ConfigStore，所有 session 共享同一份配置
 # （区别于 SSH/workspace 等 per-session 配置）
 _global_config_store = ConfigStore(base_dir="runtime")
+# AI 配置方案（多套配置的快照，激活时写回 ai_config）
+_ai_profile_store = AIProfileStore(base_dir="runtime")
 
 
 class ExecuteRequest(BaseModel):
@@ -1003,6 +1005,34 @@ def _get_cases_as_objects(session) -> list:
     return [TestCase(**c) for c in session.test_cases]
 
 
+def _mask_api_key(key: str) -> str:
+    """API Key 掩码，不向前端返回完整密钥。"""
+    if key and len(key) > 8:
+        return key[:4] + "****" + key[-4:]
+    return "****" if key else ""
+
+
+def _profile_summary(entry: AIProfileEntry) -> dict:
+    """配置方案摘要（用于列表展示，隐藏完整 API Key）。"""
+    return {
+        "id": entry.id,
+        "name": entry.name,
+        "ai_enabled": entry.config.ai_enabled,
+        "ai_protocol": entry.config.ai_protocol,
+        "ai_model": entry.config.ai_model,
+        "ai_base_url": entry.config.ai_base_url,
+        "ai_api_key_masked": _mask_api_key(entry.config.ai_api_key),
+        "created_at": entry.created_at,
+        "updated_at": entry.updated_at,
+    }
+
+
+class AIProfileCreateRequest(BaseModel):
+    """新建 AI 配置方案请求；config 为空时取当前已生效的 AI 配置。"""
+    name: str
+    config: Optional[AIConfig] = None
+
+
 @router.get("/ai/config")
 async def get_ai_config(request: Request):
     """获取 AI 配置（全局共享，不跟 session 绑定）。"""
@@ -1011,19 +1041,21 @@ async def get_ai_config(request: Request):
     )
     # 不返回完整 API Key，只返回掩码
     data = config.model_dump()
-    key = data.get("ai_api_key", "")
-    if key and len(key) > 8:
-        data["ai_api_key_masked"] = key[:4] + "****" + key[-4:]
-    else:
-        data["ai_api_key_masked"] = "****" if key else ""
+    data["ai_api_key_masked"] = _mask_api_key(config.ai_api_key)
     data.pop("ai_api_key", None)
     return data
 
 
 @router.post("/ai/config")
 async def set_ai_config(request: Request, config: AIConfig):
-    """保存 AI 配置（全局共享）。"""
+    """保存 AI 配置（全局共享）。
+
+    配置必须归属于某个方案：没有激活方案时拒绝保存，避免产生无法编辑的
+    游离配置。
+    """
     session = request.state.session
+    if _ai_profile_store.get_active() is None:
+        raise HTTPException(status_code=400, detail="请先新增一套配置方案后再编辑")
     # 如果前端发来空 key 但之前有 key，保留旧 key
     if not config.ai_api_key:
         old = _global_config_store.load(
@@ -1032,10 +1064,87 @@ async def set_ai_config(request: Request, config: AIConfig):
         if old.ai_api_key:
             config.ai_api_key = old.ai_api_key
     _global_config_store.save("ai_config", config)
+    # 若当前选中了配置方案，同步更新该方案的快照
+    _ai_profile_store.update_active(config)
     # 重置 AIService 使新配置生效
     if hasattr(session, '_ai_service'):
         session._ai_service = None
     return {"message": "AI 配置已保存"}
+
+
+@router.get("/ai/profiles")
+async def list_ai_profiles():
+    """列出所有 AI 配置方案及当前激活方案。"""
+    bundle = _ai_profile_store.load_bundle()
+    return {
+        "profiles": [_profile_summary(p) for p in bundle.profiles],
+        "active_id": bundle.active_id,
+    }
+
+
+@router.post("/ai/profiles")
+async def create_ai_profile(payload: AIProfileCreateRequest, request: Request):
+    """把配置另存为一个新方案并设为激活方案。
+
+    前端会传入未保存的表单配置，此时不会覆盖原激活方案的快照。
+    空 API Key 沿用当前生效配置中的密钥（表单不回显完整密钥）。
+    """
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="配置方案名称不能为空")
+    config = payload.config or _global_config_store.load("ai_config", AIConfig, AIConfig())
+    if not config.ai_api_key:
+        old = _global_config_store.load("ai_config", AIConfig, AIConfig())
+        if old.ai_api_key:
+            config.ai_api_key = old.ai_api_key
+    try:
+        entry = _ai_profile_store.create(name, config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # 新方案即当前表单内容，同步设为生效配置
+    _global_config_store.save("ai_config", config)
+    session = request.state.session
+    if hasattr(session, '_ai_service'):
+        session._ai_service = None
+    return {"message": f"配置方案「{entry.name}」已保存", "profile": _profile_summary(entry)}
+
+
+@router.post("/ai/profiles/{profile_id}/activate")
+async def activate_ai_profile(profile_id: str, request: Request):
+    """切换到指定配置方案：把方案快照写回当前生效配置。"""
+    try:
+        entry = _ai_profile_store.activate(profile_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="配置方案不存在")
+    _global_config_store.save("ai_config", entry.config)
+    session = request.state.session
+    if hasattr(session, '_ai_service'):
+        session._ai_service = None
+    return {"message": f"已切换到配置方案「{entry.name}」", "profile": _profile_summary(entry)}
+
+
+@router.delete("/ai/profiles/{profile_id}")
+async def delete_ai_profile(profile_id: str, request: Request):
+    """删除指定配置方案。
+
+    删除激活方案时自动激活剩余的第一个方案；没有剩余方案则当前生效配置
+    保持不变，但前端将禁止继续编辑，直到新增方案。
+    """
+    try:
+        switched, new_active = _ai_profile_store.delete(profile_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="配置方案不存在")
+
+    if switched and new_active is not None:
+        _global_config_store.save("ai_config", new_active.config)
+        session = request.state.session
+        if hasattr(session, '_ai_service'):
+            session._ai_service = None
+
+    return {
+        "message": "配置方案已删除",
+        "active_id": new_active.id if new_active else None,
+    }
 
 
 @router.get("/cleanup/config")
@@ -1078,6 +1187,30 @@ async def get_cleanup_stats(request: Request):
         "cleanup_config", CleanupConfig, CleanupConfig()
     )
     return {**stats, "config": config.model_dump()}
+
+
+class AIModelsRequest(BaseModel):
+    """查询模型列表请求；字段为空时回退到当前生效的 AI 配置。"""
+    ai_protocol: Optional[str] = None
+    ai_base_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+
+
+@router.post("/ai/models")
+async def list_ai_models(payload: AIModelsRequest):
+    """按接入地址查询可用模型列表。
+
+    查询失败（地址不可达、端点不支持、鉴权失败）返回空列表，
+    前端保留手动输入，不视为错误。
+    """
+    from app.ai.model_listing import list_models
+
+    saved = _global_config_store.load("ai_config", AIConfig, AIConfig())
+    protocol = payload.ai_protocol or saved.ai_protocol
+    base_url = payload.ai_base_url if payload.ai_base_url is not None else saved.ai_base_url
+    api_key = payload.ai_api_key or saved.ai_api_key
+    models = await list_models(protocol, base_url, api_key)
+    return {"models": models}
 
 
 @router.post("/ai/test")

@@ -204,6 +204,30 @@ export interface AIConfig {
   ai_cache_ttl_hours: number
 }
 
+/** 已保存的 AI 配置方案摘要（不含完整 API Key） */
+export interface AIProfileSummary {
+  id: string
+  name: string
+  ai_enabled: boolean
+  ai_protocol: AIConfig['ai_protocol']
+  ai_model: string
+  ai_base_url: string
+  ai_api_key_masked?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AIProfilesResponse {
+  profiles: AIProfileSummary[]
+  active_id: string | null
+}
+
+/** 从接入地址查询到的模型项 */
+export interface AIModelInfo {
+  id: string
+  label: string
+}
+
 export interface AIAnalysis {
   case_id: string
   root_cause_category: 'environment' | 'defect' | 'test_issue' | 'flaky' | 'mismatch'

@@ -3,6 +3,9 @@ import type {
   AIConfig,
   AIAnalysis,
   AIConnectionTestResult,
+  AIModelInfo,
+  AIProfileSummary,
+  AIProfilesResponse,
   AIJudgment,
   AIReport,
   AIParseStepsResponse,
@@ -135,8 +138,22 @@ export const pushLocalToBoard = (localPath: string, remotePath: string) =>
 export const getAIConfig = () => api.get<AIConfig>('/ai/config')
 export const setAIConfig = (config: Partial<AIConfig>) =>
   api.post<ApiMessageResponse>('/ai/config', config)
+// ---- AI 配置方案 ----
+export const listAIProfiles = () => api.get<AIProfilesResponse>('/ai/profiles')
+export const createAIProfile = (name: string, config?: Partial<AIConfig>) =>
+  api.post<{ message: string; profile: AIProfileSummary }>('/ai/profiles', { name, config })
+export const activateAIProfile = (id: string) =>
+  api.post<{ message: string; profile: AIProfileSummary }>(`/ai/profiles/${id}/activate`)
+export const deleteAIProfile = (id: string) =>
+  api.delete<{ message: string; active_id: string | null }>(`/ai/profiles/${id}`)
 export const testAIConnection = () =>
   api.post<AIConnectionTestResult>('/ai/test')
+/** 按接入地址查询可用模型；查询失败返回空列表 */
+export const listAIModels = (payload: {
+  ai_protocol?: string
+  ai_base_url?: string
+  ai_api_key?: string
+}) => api.post<{ models: AIModelInfo[] }>('/ai/models', payload, { timeout: 20000 })
 export const analyzeFailure = (caseId: string, force = false) =>
   api.post<{ analysis: AIAnalysis }>('/ai/analyze', { case_id: caseId, force }, { timeout: 180000 })
 
