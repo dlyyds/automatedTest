@@ -452,12 +452,9 @@ class ExcelHandler:
             ws = _worksheet_for_case(tc)
             rcm = _result_col_for(tc)
 
+            # --- Actual Result column: only the status ---
             cell = ws.cell(row=row, column=rcm['actual_result'])
             cell.value = tc.status
-
-            # Append execution log/evidence summary below status when available
-            if tc.actual_result:
-                cell.value = f"{tc.status}\n{tc.actual_result}"
 
             if tc.status in self.STATUS_COLORS:
                 cell.fill = PatternFill(
@@ -466,11 +463,18 @@ class ExcelHandler:
                     fill_type='solid'
                 )
 
-            remark_value = tc.actual_result or tc.remarks or ""
-            if not remark_value and tc.log_file:
-                remark_value = tc.log_file
-            if remark_value:
-                ws.cell(row=row, column=rcm['remarks']).value = _sanitize_cell_value(remark_value)
+            # --- Bug column: leave empty (nothing to write) ---
+
+            # --- Remarks column: full log file content ---
+            if tc.log_file and os.path.isfile(tc.log_file):
+                try:
+                    with open(tc.log_file, "r", encoding="utf-8") as f:
+                        log_content = f.read()
+                    ws.cell(row=row, column=rcm['remarks']).value = _sanitize_cell_value(log_content)
+                except Exception:
+                    pass
+            elif tc.remarks:
+                ws.cell(row=row, column=rcm['remarks']).value = _sanitize_cell_value(tc.remarks)
 
             if tc.test_version:
                 ws.cell(row=row, column=rcm['test_version']).value = tc.test_version
