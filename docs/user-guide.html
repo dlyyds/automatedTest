@@ -438,6 +438,7 @@ li code {
           <tr><td class="field-name">tester_name</td><td class="field-desc">测试人姓名，自动写入 Excel 结果的「测试人」列</td></tr>
           <tr><td class="field-name">test_version</td><td class="field-desc">测试版本号，写入「测试版本」列</td></tr>
           <tr><td class="field-name">default_remote_path</td><td class="field-desc">板端测试命令的工作目录（如 <code>/storage/zja/</code>），所有命令在此目录下执行</td></tr>
+          <tr><td class="field-name">driver_path</td><td class="field-desc">板端驱动存放目录（如 <code>/usr/lib/nvidia/nvsipl_drv</code>）。配置后执行每条命令前会设置 <code>export LD_LIBRARY_PATH="&lt;目录&gt;${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"</code>，使板端优先加载该目录下的驱动库；留空则不设置</td></tr>
           <tr><td class="field-name">run_prerequisites</td><td class="field-desc">是否在每个用例执行前先运行「前提条件」列中的命令</td></tr>
         </table>
       </div>

@@ -63,6 +63,9 @@ export default function WorkspaceConfigPage() {
         <Form.Item name="default_remote_path" label="远程工作路径" style={{ marginBottom: 12 }}>
           <Input placeholder="板端测试命令的工作目录" />
         </Form.Item>
+        <Form.Item name="driver_path" label="驱动存放路径" style={{ marginBottom: 12 }}>
+          <Input placeholder="板端驱动目录，如 /usr/lib/nvidia/nvsipl_drv（留空则不设置 LD_LIBRARY_PATH）" />
+        </Form.Item>
         <Form.Item name="run_prerequisites" valuePropName="checked" style={{ marginBottom: 8 }}>
           <Checkbox>执行前置条件</Checkbox>
         </Form.Item>

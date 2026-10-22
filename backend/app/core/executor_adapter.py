@@ -332,6 +332,7 @@ class ExecutorAdapter:
                             if CommandParser.is_nvsipl_camera_command(step.command):
                                 shell_cmd = self._wrap_nvsipl_with_gc(shell_cmd, step.command)
 
+                            shell_cmd = self._apply_driver_lib_path(shell_cmd)
                             if work_dir:
                                 shell_cmd = f"cd {work_dir} && {shell_cmd}"
                             last_cmd = shell_cmd
@@ -1006,6 +1007,14 @@ class ExecutorAdapter:
                 await _read_shell(3.0, stop_pattern=r"[#\$>]\s*$")
                 await self.ws.send_log(f"[{case.case_id}] [持久Shell] cd -> {work_dir}", "info")
 
+            # 驱动库路径：在持久 shell 内设置一次，后续所有步骤沿用
+            driver_export = self._driver_lib_path_export()
+            if driver_export:
+                await _send_cmd(driver_export)
+                await _read_shell(3.0, stop_pattern=r"[#\$>]\s*$")
+                await self.ws.send_log(
+                    f"[{case.case_id}] [持久Shell] 设置驱动库路径: {driver_export}", "info")
+
             # 展开 repeat 步骤为实际步骤序列
             resolved_steps = []
             for step in steps:
@@ -1357,6 +1366,34 @@ class ExecutorAdapter:
             max_len = max(max_len, 1200)  # \u4fdd\u7559\u5b8c\u6574\u7684 AI \u5224\u5b9a\u4f9d\u636e\u4e0e\u8bc1\u636e
         return summary[:max_len]
 
+    def _driver_lib_path_export(self) -> str:
+        """根据工作区配置生成 LD_LIBRARY_PATH 的 export 语句。
+
+        生成：export LD_LIBRARY_PATH="<驱动目录>${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        未配置驱动存放路径时返回空串。
+        """
+        if not self.workspace:
+            return ""
+        driver_path = getattr(self.workspace, "driver_path", "")
+        if not driver_path:
+            return ""
+        driver_path = driver_path.rstrip("/")
+        return (
+            f'export LD_LIBRARY_PATH="'
+            f'{driver_path}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"'
+        )
+
+    def _apply_driver_lib_path(self, cmd: str) -> str:
+        """给命令前置驱动库搜索路径（LD_LIBRARY_PATH）。
+
+        export 在同一个 shell 中执行，驱动目录会追加到 LD_LIBRARY_PATH 之前，
+        保证板端优先加载配置目录下的 .so。
+        """
+        export = self._driver_lib_path_export()
+        if not export:
+            return cmd
+        return f"{export} && {cmd}"
+
     def _apply_nito_override(self, cmd: str) -> str:
         """\u5982\u679c\u542f\u7528\u4e86 nito \u8def\u5f84\u8986\u76d6\uff0c\u66ff\u6362\u547d\u4ee4\u4e2d\u7684 --nito \u53c2\u6570\u8def\u5f84\u3002
 
@@ -1566,6 +1603,7 @@ class ExecutorAdapter:
                 if not ok:
                     return False, "\n".join(outputs)
             else:
+                cmd = self._apply_driver_lib_path(cmd)
                 await self.ws.send_log(f"前置条件执行: {cmd}", "info")
                 exit_code, stdout, stderr = await self._ssh_execute(cmd, timeout=60)
                 outputs.append(
@@ -1820,6 +1858,7 @@ class ExecutorAdapter:
         nvsipl_cmd = self._apply_nito_override(nvsipl_cmd)
         nvsipl_cmd = self._apply_image_path_override(nvsipl_cmd)
         nvsipl_cmd = self._apply_sudo_password(nvsipl_cmd, pty_mode=True)
+        nvsipl_cmd = self._apply_driver_lib_path(nvsipl_cmd)
 
         cd_prefix = f"cd {work_dir} && " if work_dir else ""
         full_cmd = f"{cd_prefix}{nvsipl_cmd}"
@@ -2264,6 +2303,7 @@ class ExecutorAdapter:
                         shell_cmd = self._apply_nito_override(shell_cmd)
                         shell_cmd = self._apply_image_path_override(shell_cmd)
                         shell_cmd = self._apply_sudo_password(shell_cmd)
+                        shell_cmd = self._apply_driver_lib_path(shell_cmd)
                         if work_dir:
                             shell_cmd = f"cd {work_dir} && {shell_cmd}"
                         last_cmd = shell_cmd

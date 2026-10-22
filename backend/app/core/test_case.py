@@ -148,6 +148,7 @@ class WorkspaceConfig(BaseModel):
     tester_name: str = ""
     test_version: str = ""
     default_remote_path: str = ""
+    driver_path: str = ""
     nito_override_path: str = ""
     nito_override_enabled: bool = False
     image_storage_path: str = ""

@@ -52,6 +52,7 @@ export interface WorkspaceConfig {
   tester_name: string
   test_version: string
   default_remote_path: string
+  driver_path: string
   nito_override_path: string
   nito_override_enabled: boolean
   image_storage_path: string
