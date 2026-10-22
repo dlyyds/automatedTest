@@ -10,6 +10,9 @@ import type {
 
 let sharedSocket: WebSocket | null = null
 let subscriberCount = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+const RECONNECT_BASE_MS = 1000
+const RECONNECT_MAX_MS = 15000
 
 const buildWebSocketUrl = () => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -18,6 +21,28 @@ const buildWebSocketUrl = () => {
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
+  const reconnectAttemptsRef = useRef(0)
+  const prevReconnectDelayMsRef = useRef(RECONNECT_BASE_MS)
+  // Mutable ref to avoid circular dependency between scheduleReconnect and connect
+  const connectFnRef = useRef<(() => void) | null>(null)
+
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectTimer) return // already scheduled
+    const delay = Math.min(prevReconnectDelayMsRef.current, RECONNECT_MAX_MS)
+    prevReconnectDelayMsRef.current = Math.min(delay * 2, RECONNECT_MAX_MS)
+    reconnectAttemptsRef.current += 1
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connectFnRef.current?.()
+    }, delay)
+  }, [])
+
+  const clearReconnectSchedule = useCallback(() => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }, [])
 
   const handleMessage = useCallback((data: WsIncomingMessage) => {
     const store = useStore.getState()
@@ -114,6 +139,9 @@ export function useWebSocket() {
       }
       store.setIsConnected(true)
       store.addLog({ level: 'info', message: 'WebSocket 已连接', timestamp: Date.now() })
+      // Reset reconnect state on successful connection
+      reconnectAttemptsRef.current = 0
+      prevReconnectDelayMsRef.current = RECONNECT_BASE_MS
     }
 
     ws.onmessage = (event) => {
@@ -121,7 +149,7 @@ export function useWebSocket() {
       handleMessage(data)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (wsRef.current !== ws && sharedSocket !== ws) {
         return
       }
@@ -129,7 +157,20 @@ export function useWebSocket() {
         sharedSocket = null
       }
       store.setIsConnected(false)
-      store.addLog({ level: 'warning', message: 'WebSocket 已断开', timestamp: Date.now() })
+
+      // Don't reconnect during normal unmount (subscriberCount === 0 handled in effect cleanup)
+      // Also skip reconnect if the close was intentional (code 1000 Normal Closure)
+      if (event.code === 1000 || event.code === 1001) {
+        return
+      }
+
+      const attempt = reconnectAttemptsRef.current
+      store.addLog({
+        level: 'warning',
+        message: `WebSocket 已断开 (尝试#${attempt + 1} 重连)...`,
+        timestamp: Date.now(),
+      })
+      scheduleReconnect()
     }
 
     ws.onerror = () => {
@@ -138,7 +179,10 @@ export function useWebSocket() {
       }
       store.addLog({ level: 'error', message: 'WebSocket 连接错误', timestamp: Date.now() })
     }
-  }, [handleMessage])
+  }, [handleMessage, scheduleReconnect])
+
+  // Store connect in ref so scheduleReconnect can call it without circular deps
+  connectFnRef.current = connect
 
   const send = useCallback((msg: WsOutgoingMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -167,13 +211,16 @@ export function useWebSocket() {
     connect()
     return () => {
       subscriberCount = Math.max(0, subscriberCount - 1)
-      if (subscriberCount === 0 && wsRef.current) {
+      clearReconnectSchedule()
+      if (wsRef.current) {
         wsRef.current.close()
         wsRef.current = null
+      }
+      if (sharedSocket) {
         sharedSocket = null
       }
     }
-  }, [connect])
+  }, [connect, clearReconnectSchedule])
 
   return { connect, send, stopExecution, confirmResponse }
 }
