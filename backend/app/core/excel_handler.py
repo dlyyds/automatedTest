@@ -452,9 +452,12 @@ class ExcelHandler:
             ws = _worksheet_for_case(tc)
             rcm = _result_col_for(tc)
 
-            # --- Actual Result column: only the status ---
+            # --- Actual Result column: status + evidence summary ---
             cell = ws.cell(row=row, column=rcm['actual_result'])
-            cell.value = tc.status
+            if tc.actual_result:
+                cell.value = f"{tc.status}\n{tc.actual_result}"
+            else:
+                cell.value = tc.status
 
             if tc.status in self.STATUS_COLORS:
                 cell.fill = PatternFill(
