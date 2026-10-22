@@ -138,13 +138,123 @@ export const setAIConfig = (config: Partial<AIConfig>) =>
 export const testAIConnection = () =>
   api.post<AIConnectionTestResult>('/ai/test')
 export const analyzeFailure = (caseId: string, force = false) =>
-  api.post<{ analysis: AIAnalysis }>('/ai/analyze', { case_id: caseId, force }, { timeout: 60000 })
+  api.post<{ analysis: AIAnalysis }>('/ai/analyze', { case_id: caseId, force }, { timeout: 180000 })
+
+export interface AnalyzeStreamHandlers {
+  /** 思考型模型的推理过程增量 */
+  onThinking?: (text: string) => void
+  /** 收到增量文本（模型原始 JSON 输出片段） */
+  onDelta?: (text: string) => void
+  /** 流结束且解析成功 */
+  onDone: (analysis: AIAnalysis) => void
+  /** 流式调用失败 */
+  onError: (message: string) => void
+}
+
+/**
+ * AI 失败分析（SSE 流式）。
+ *
+ * 使用 fetch + ReadableStream 读取后端事件流，边接收边回调，
+ * 避免长时间无响应以及网关/代理超时。
+ */
+export async function analyzeFailureStream(
+  caseId: string,
+  force: boolean,
+  handlers: AnalyzeStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/ai/analyze/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-ID': sessionId,
+      },
+      body: JSON.stringify({ case_id: caseId, force }),
+      signal,
+    })
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return
+    handlers.onError(err?.message || '分析请求失败')
+    return
+  }
+
+  if (!resp.ok) {
+    let detail = `分析请求失败 (HTTP ${resp.status})`
+    try {
+      const data = await resp.json()
+      if (data?.detail) detail = data.detail
+    } catch {
+      // 响应体不是 JSON，保留默认消息
+    }
+    handlers.onError(detail)
+    return
+  }
+
+  if (!resp.body) {
+    handlers.onError('当前浏览器不支持流式读取')
+    return
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let settled = false
+
+  const handleLine = (line: string) => {
+    if (!line.startsWith('data:') || settled) return
+    const payload = line.slice(5).trim()
+    if (!payload) return
+    let event: any
+    try {
+      event = JSON.parse(payload)
+    } catch {
+      return
+    }
+    if (event.type === 'thinking') {
+      handlers.onThinking?.(event.text || '')
+    } else if (event.type === 'delta') {
+      handlers.onDelta?.(event.text || '')
+    } else if (event.type === 'done') {
+      settled = true
+      handlers.onDone(event.analysis)
+    } else if (event.type === 'error') {
+      settled = true
+      handlers.onError(event.message || 'AI 分析失败')
+    }
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx = buffer.indexOf('\n\n')
+      while (idx >= 0) {
+        const block = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        block.split('\n').forEach(handleLine)
+        idx = buffer.indexOf('\n\n')
+      }
+    }
+    buffer += decoder.decode()
+    if (buffer) buffer.split('\n').forEach(handleLine)
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return
+    if (!settled) handlers.onError(err?.message || '流式连接中断')
+    return
+  }
+
+  if (!settled) handlers.onError('连接中断，未收到完整分析结果')
+}
+
 export const analyzeAllFailures = () =>
   api.post<{ analyses: AIAnalysis[]; total: number; analyzed: number }>('/ai/analyze-all', {}, { timeout: 300000 })
 export const generateReport = (format: string = 'markdown') =>
   api.post<AIReport>('/ai/report', { format }, { timeout: 120000 })
 export const aiJudgeResult = (caseId: string) =>
-  api.post<{ judgment: AIJudgment }>('/ai/judge', { case_id: caseId }, { timeout: 60000 })
+  api.post<{ judgment: AIJudgment }>('/ai/judge', { case_id: caseId }, { timeout: 180000 })
 
 // ---- AI 步骤解析 API ----
 export const aiParseSteps = (data: { step_text: string; context?: string; case_id?: string }) =>

@@ -1203,7 +1203,7 @@ class ExecutorAdapter:
         """\u4ece\u6267\u884c\u7ed3\u679c\u548c\u5339\u914d\u539f\u56e0\u4e2d\u63d0\u53d6\u5173\u952e\u8bc1\u636e\u6458\u8981\u3002
 
         \u751f\u6210\u683c\u5f0f: [Pass/Fail/\u5f85\u786e\u8ba4] \u5224\u5b9a\u4f9d\u636e | \u5173\u952e\u8f93\u51fa\u884c
-        \u82e5\u7531 AI \u5224\u5b9a\uff0c\u5c55\u793a AI \u5224\u5b9a\u72b6\u6001\u4e0e\u7406\u7531\uff08\u4e0d\u542b\u7f6e\u4fe1\u5ea6\u548c\u8bc1\u636e\u660e\u7ec6\uff09\u3002
+        \u82e5\u7531 AI \u5224\u5b9a\uff0c\u4ec5\u5c55\u793a AI \u5224\u5b9a\u72b6\u6001\u4e0e\u7406\u7531\uff08\u4e0d\u542b\u7f6e\u4fe1\u5ea6\u3001\u8bc1\u636e\u660e\u7ec6\u548c\u5173\u952e\u8f93\u51fa\u884c\uff09\u3002
         \u7528\u4e8e\u524d\u7aef\u5c55\u793a\u548c Excel \u56de\u5199\uff0c\u4f7f\u5224\u5b9a\u4f9d\u636e\u4e00\u76ee\u4e86\u7136\u3002
         """
         import re
@@ -1221,8 +1221,8 @@ class ExecutorAdapter:
         if ai_judged:
             ai_status = getattr(result, "ai_status", "") or ""
             reason_text = ai_reason or "(AI 未提供文字说明)"
-            # 实际结果栏仅展示 AI 判定状态与理由，不展示置信度和证据明细
-            reason_summary = f"[AI判定] {ai_status} 判定依据: {reason_text}"
+            # 实际结果栏仅展示 AI 判定状态与理由，不再追加关键输出行
+            return f"{status_label} [AI判定] {ai_status} 判定依据: {reason_text}"[:1200]
         elif passed is not True and error_msg:
             # \u6267\u884c\u5f02\u5e38\u76f4\u63a5\u7528 error_msg
             reason_summary = error_msg[:150]
@@ -1394,14 +1394,13 @@ class ExecutorAdapter:
             is_generic_reason = all(
                 k in reason_summary for k in ['OK']
             ) and '\u5e27' not in reason_summary and '\u5339\u914d' not in reason_summary
-            if ai_judged or not (interactive_output_lines and is_generic_reason):
+            if not (interactive_output_lines and is_generic_reason):
                 parts.append(reason_summary)
         if evidence_lines:
             parts.append("\n".join(evidence_lines))
 
         if parts:
-            separator = "\n" if ai_judged else " | "
-            summary = f"{status_label} {separator.join(parts)}"
+            summary = f"{status_label} {' | '.join(parts)}"
         else:
             # \u515c\u5e95
             fallback = actual[:300] if actual else reason[:300]
@@ -1417,8 +1416,6 @@ class ExecutorAdapter:
             max_len = 1500  # \u6545\u969c\u6d4b\u8bd5\u9700\u8981\u5c55\u793a\u5b8c\u6574 error log
         else:
             max_len = 500
-        if ai_judged:
-            max_len = max(max_len, 1200)  # \u4fdd\u7559\u5b8c\u6574\u7684 AI \u5224\u5b9a\u4f9d\u636e\u4e0e\u8bc1\u636e
         return summary[:max_len]
 
     def _driver_lib_path_export(self) -> str:

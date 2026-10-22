@@ -5,11 +5,12 @@ OpenAI API Provider。
 """
 from __future__ import annotations
 
+from typing import AsyncIterator
 from urllib.parse import urljoin
 
 import httpx
 
-from .base import BaseProvider, LLMResponse
+from .base import BaseProvider, LLMResponse, LLMStreamEvent
 
 
 class OpenAIProvider(BaseProvider):
@@ -28,7 +29,7 @@ class OpenAIProvider(BaseProvider):
     def _get_client(self):
         if self._client is None:
             import openai
-            kwargs = {"api_key": self.api_key, "timeout": 60.0}
+            kwargs = {"api_key": self.api_key, "timeout": 180.0}
             if self.base_url:
                 kwargs["base_url"] = self.base_url
             self._client = openai.AsyncOpenAI(**kwargs)
@@ -59,7 +60,7 @@ class OpenAIProvider(BaseProvider):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
@@ -72,6 +73,7 @@ class OpenAIProvider(BaseProvider):
             model=model,
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
+            stop_reason=choice.get("finish_reason") or "",
         )
 
     async def complete(
@@ -103,6 +105,7 @@ class OpenAIProvider(BaseProvider):
                 model=use_model,
                 input_tokens=usage.prompt_tokens if usage else 0,
                 output_tokens=usage.completion_tokens if usage else 0,
+                stop_reason=(choice.finish_reason or "") if choice else "",
             )
         except ImportError:
             try:
@@ -124,6 +127,104 @@ class OpenAIProvider(BaseProvider):
                 content="",
                 model=use_model,
                 error=f"OpenAI API 调用失败: {type(e).__name__}: {e}",
+            )
+
+    async def stream_complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        model: str = "",
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        """OpenAI Chat Completions 原生流式调用。"""
+        use_model = model or self.default_model
+        emitted = False
+        input_tokens = 0
+        output_tokens = 0
+        try:
+            client = self._get_client()
+            stream = await client.chat.completions.create(
+                model=use_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                stream=True,
+            )
+            finish_reason = ""
+            async for chunk in stream:
+                # 部分网关即使不传 stream_options 也会在最后一块返回 usage
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    input_tokens = getattr(usage, "prompt_tokens", 0) or input_tokens
+                    output_tokens = getattr(usage, "completion_tokens", 0) or output_tokens
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                # 推理模型（DeepSeek 等）的思考内容字段
+                reasoning = (
+                    getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                ) if delta else None
+                if reasoning:
+                    yield LLMStreamEvent(type="thinking", text=reasoning)
+                text = getattr(delta, "content", None) if delta else None
+                if text:
+                    emitted = True
+                    yield LLMStreamEvent(type="delta", text=text)
+
+            yield LLMStreamEvent(
+                type="done",
+                model=use_model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                stop_reason=finish_reason,
+            )
+        except ImportError:
+            resp = await self._complete_httpx(
+                system_prompt, user_prompt,
+                model=use_model, temperature=temperature, max_tokens=max_tokens,
+            )
+            if resp.ok and resp.content:
+                yield LLMStreamEvent(type="delta", text=resp.content)
+            yield LLMStreamEvent(
+                type="done",
+                model=resp.model,
+                input_tokens=resp.input_tokens,
+                output_tokens=resp.output_tokens,
+                stop_reason=resp.stop_reason,
+                error=resp.error,
+            )
+        except Exception as e:
+            if emitted:
+                yield LLMStreamEvent(
+                    type="done",
+                    model=use_model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    error=f"OpenAI 流式调用中断: {type(e).__name__}: {e}",
+                )
+                return
+            resp = await self.complete(
+                system_prompt, user_prompt,
+                model=model, temperature=temperature, max_tokens=max_tokens,
+            )
+            if resp.ok and resp.content:
+                yield LLMStreamEvent(type="delta", text=resp.content)
+            yield LLMStreamEvent(
+                type="done",
+                model=resp.model,
+                input_tokens=resp.input_tokens,
+                output_tokens=resp.output_tokens,
+                stop_reason=resp.stop_reason,
+                error=resp.error,
             )
 
     async def test_connection(self) -> tuple[bool, str]:

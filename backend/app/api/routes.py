@@ -8,13 +8,14 @@ REST API 路由。
 支持多个 PC 端同时独立测试。
 """
 import asyncio
+import json
 import os
 from datetime import datetime
 from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from app.core.test_case import TestCase, SSHConfig, SSHStatus, WorkspaceConfig, AIConfig, CleanupConfig
@@ -1125,10 +1126,72 @@ async def analyze_failure(request: Request, payload: AnalyzeRequest):
         force_refresh=payload.force,
     )
 
-    if result is None:
-        raise HTTPException(status_code=502, detail="AI 分析失败，请检查 AI 配置和网络连接")
+    if not result or result.get("_error"):
+        detail = (result or {}).get("_error") or "AI 分析失败，请检查 AI 配置和网络连接"
+        raise HTTPException(status_code=502, detail=detail)
 
     return {"analysis": result}
+
+
+@router.post("/ai/analyze/stream")
+async def analyze_failure_stream(request: Request, payload: AnalyzeRequest):
+    """AI 失败分析（SSE 流式输出）。
+
+    事件格式（每行一个 JSON）:
+    - {"type": "delta", "text": "..."}
+    - {"type": "done", "analysis": {...}}
+    - {"type": "error", "message": "..."}
+    """
+    session = request.state.session
+    service = _get_ai_service(session)
+
+    if not service.enabled:
+        raise HTTPException(status_code=400, detail="AI 功能未启用，请先配置 AI 设置")
+
+    # 查找用例
+    case = None
+    for c in _get_cases_as_objects(session):
+        case_key = c.case_key or f"{c.source_sheet}:{c.row_number}:{c.case_id}"
+        if case_key == payload.case_id or c.case_id == payload.case_id:
+            case = c
+            break
+
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"用例 {payload.case_id} 不存在")
+
+    if case.status.upper() not in ("FAIL", "REVIEW"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"用例 {case.case_id} 状态为 {case.status}，只有 Fail/Review 可分析"
+        )
+
+    async def event_stream():
+        try:
+            async for event in service.stream_analyze_failure(
+                case_id=case.case_id,
+                description=case.description,
+                test_steps=case.test_steps,
+                expected_result=case.expected_result,
+                actual_output=case.actual_result,
+                match_reason=case.remarks,
+                error_msg="",
+                force_refresh=payload.force,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            message = f"流式分析异常: {type(e).__name__}: {e}"
+            yield f"data: {json.dumps({'type': 'error', 'message': message}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/ai/analyze-all")
@@ -1145,6 +1208,7 @@ async def analyze_all_failures(request: Request):
         return {"analyses": [], "message": "没有需要分析的失败用例"}
 
     analyses = []
+    errors = []
     for case in fail_cases:
         result = await service.analyze_failure(
             case_id=case.case_id,
@@ -1154,10 +1218,19 @@ async def analyze_all_failures(request: Request):
             actual_output=case.actual_result,
             match_reason=case.remarks,
         )
-        if result:
+        if not result:
+            errors.append({"case_id": case.case_id, "error": "AI 分析失败"})
+        elif result.get("_error"):
+            errors.append({"case_id": case.case_id, "error": result["_error"]})
+        else:
             analyses.append(result)
 
-    return {"analyses": analyses, "total": len(fail_cases), "analyzed": len(analyses)}
+    return {
+        "analyses": analyses,
+        "errors": errors,
+        "total": len(fail_cases),
+        "analyzed": len(analyses),
+    }
 
 
 @router.post("/ai/report")

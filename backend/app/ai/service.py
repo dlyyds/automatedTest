@@ -10,10 +10,10 @@ from __future__ import annotations
 import json
 import re
 import traceback
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from .cache import AICache
-from .providers.base import BaseProvider, LLMResponse
+from .providers.base import BaseProvider, LLMResponse, LLMStreamEvent
 from .providers.anthropic_provider import AnthropicProvider
 from .providers.openai_provider import OpenAIProvider
 from .providers.ollama_provider import OllamaProvider
@@ -155,7 +155,7 @@ class AIService:
             system_prompt=judge_prompt.SYSTEM_PROMPT,
             user_prompt=user_msg,
             temperature=0.2,
-            max_tokens=1024,
+            max_tokens=4096,
         )
 
         if not resp.ok:
@@ -192,7 +192,8 @@ class AIService:
         """AI 失败分析。
 
         返回: {root_cause_category, root_cause_summary, evidence[], explanation,
-               suggestion[], confidence, is_likely_real_bug} 或 None（降级）
+               suggestion[], confidence, is_likely_real_bug}；
+        失败时返回 {"_error": "原因"} 供调用方区分。
 
         force_refresh=True 时跳过缓存，强制重新调用 AI（用户点"重新分析"）。
         """
@@ -221,15 +222,19 @@ class AIService:
             system_prompt=analyze_prompt.SYSTEM_PROMPT,
             user_prompt=user_msg,
             temperature=0.3,
-            max_tokens=1536,
+            # 思考型模型会先消耗大量 token 做 reasoning，给足预算避免 JSON 被截断
+            max_tokens=8192,
         )
 
         if not resp.ok:
-            return None
+            return {"_error": f"API 调用失败: {resp.error}"}
 
         result = self._parse_json_response(resp.content)
         if result is None:
-            return None
+            suffix = "（输出达到 max_tokens 被截断）" if resp.truncated else ""
+            return {
+                "_error": f"AI 返回内容无法解析为 JSON{suffix}: {resp.content[:200]}"
+            }
 
         result["case_id"] = case_id
         result["_source"] = "ai"
@@ -239,6 +244,94 @@ class AIService:
         self._cache.set(*cache_key_parts, value=result)
 
         return result
+
+    async def stream_analyze_failure(
+        self,
+        case_id: str,
+        description: str,
+        test_steps: str,
+        expected_result: str,
+        actual_output: str,
+        match_reason: str = "",
+        error_msg: str = "",
+        force_refresh: bool = False,
+    ) -> AsyncIterator[dict]:
+        """AI 失败分析（流式）。
+
+        依次产出:
+        - {"type": "thinking", "text": "..."} 思考过程增量（可选）
+        - {"type": "delta", "text": "..."}  模型正式输出的增量文本
+        - {"type": "done", "analysis": {...}} 解析完成的完整分析
+        - {"type": "error", "message": "..."} 失败原因
+        """
+        if not self.enabled or self.provider is None:
+            yield {
+                "type": "error",
+                "message": "AI 功能未启用或 Provider 未就绪（缺少 API Key？）",
+            }
+            return
+
+        # 检查缓存
+        error_sig = error_msg[:100] if error_msg else match_reason[:100]
+        cache_key_parts = ("analyze", case_id, error_sig)
+        cached = None if force_refresh else self._cache.get(*cache_key_parts)
+        if cached:
+            cached["_from_cache"] = True
+            yield {"type": "done", "analysis": cached}
+            return
+
+        user_msg = analyze_prompt.build_analyze_prompt(
+            case_id=case_id,
+            description=description,
+            test_steps=test_steps,
+            expected_result=expected_result,
+            actual_output=actual_output,
+            match_reason=match_reason,
+            error_msg=error_msg,
+        )
+
+        chunks: list[str] = []
+        final: Optional[LLMStreamEvent] = None
+        async for event in self.provider.stream_complete(
+            system_prompt=analyze_prompt.SYSTEM_PROMPT,
+            user_prompt=user_msg,
+            temperature=0.3,
+            max_tokens=8192,
+        ):
+            if event.type == "delta":
+                if event.text:
+                    chunks.append(event.text)
+                    yield {"type": "delta", "text": event.text}
+            elif event.type == "thinking":
+                if event.text:
+                    yield {"type": "thinking", "text": event.text}
+            elif event.type == "done":
+                final = event
+
+        content = "".join(chunks)
+        result = self._parse_json_response(content)
+        if result is None:
+            if final is not None and final.error:
+                message = f"API 调用失败: {final.error}"
+            elif not content and final is not None and final.truncated:
+                message = (
+                    "模型输出被截断：thinking 占用了全部输出预算，未返回文本。"
+                    "请增大 max_tokens 或关闭 thinking"
+                )
+            else:
+                suffix = "（输出达到 max_tokens 被截断）" if final and final.truncated else ""
+                message = f"AI 返回内容无法解析为 JSON{suffix}: {content[:200]}"
+            yield {"type": "error", "message": message}
+            return
+
+        result["case_id"] = case_id
+        result["_source"] = "ai"
+        result["_model"] = final.model if final else ""
+        result["_tokens"] = ((final.input_tokens + final.output_tokens) if final else 0)
+
+        self._cache.set(*cache_key_parts, value=result)
+
+        yield {"type": "done", "analysis": result}
 
     # ------------------------------------------------------------------
     # 报告生成
@@ -336,7 +429,7 @@ class AIService:
             system_prompt=step_parse_prompt.SYSTEM_PROMPT,
             user_prompt=user_msg,
             temperature=0.2,
-            max_tokens=2048,
+            max_tokens=8192,
         )
 
         if not resp.ok:
@@ -583,27 +676,116 @@ class AIService:
 
         content = content.strip()
 
-        # 尝试 ```json ... ``` 块
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # 尝试找到第一个 { ... } 块
-        brace_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
-        if brace_match:
-            try:
-                return json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
-                pass
-
         # 尝试直接解析
         try:
-            return json.loads(content)
+            result = json.loads(content)
+            if isinstance(result, dict):
+                return result
         except json.JSONDecodeError:
+            pass
+
+        # 去掉 ``` 围栏后解析
+        fenced = re.sub(r'^```(?:json)?\s*|\s*```$', '', content, flags=re.IGNORECASE).strip()
+        if fenced != content:
+            try:
+                result = json.loads(fenced)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 扫描第一个完整的 {...}（支持嵌套）
+        obj = AIService._extract_balanced(content, '{', '}')
+        if obj:
+            try:
+                result = json.loads(obj)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 输出被截断时尝试补齐引号/括号
+        return AIService._repair_truncated_json(content)
+
+    @staticmethod
+    def _extract_balanced(text: str, open_ch: str, close_ch: str) -> Optional[str]:
+        """提取第一个括号配对完整的片段（忽略字符串内的括号）。"""
+        start = text.find(open_ch)
+        while start != -1:
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == '\\':
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == open_ch:
+                    depth += 1
+                elif ch == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+            start = text.find(open_ch, start + 1)
+        return None
+
+    @staticmethod
+    def _repair_truncated_json(text: str) -> Optional[dict]:
+        """尝试补全被截断的 JSON 对象（如 max_tokens 截断）。"""
+        start = text.find('{')
+        if start == -1:
             return None
+        s = text[start:]
+        for _ in range(5):
+            candidate = s.rstrip()
+            if candidate.endswith(','):
+                candidate = candidate[:-1]
+
+            stack = []
+            in_str = False
+            esc = False
+            for ch in candidate:
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == '\\':
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch in '{[':
+                    stack.append('}' if ch == '{' else ']')
+                elif ch in '}]':
+                    if stack:
+                        stack.pop()
+
+            if in_str:
+                candidate += '"'
+            candidate += ''.join(reversed(stack))
+
+            try:
+                result = json.loads(candidate)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+            # 回退到最后一个逗号，丢弃不完整的尾部再试
+            idx = s.rfind(',')
+            if idx == -1:
+                return None
+            s = s[:idx]
+
+        return None
 
     @staticmethod
     def _parse_json_array_response(content: str) -> Optional[list]:
